@@ -21,6 +21,10 @@ pub struct AppConfig {
     pub system_prompt_append: Vec<String>,
     /// `--no-context-files`: skip AGENTS.md / CLAUDE.md discovery.
     pub no_context_files: bool,
+    /// Summarize the abandoned branch when `/tree` switches branches.
+    /// Used by the `tui` feature.
+    #[allow(dead_code)]
+    pub summarize_branches: bool,
 }
 
 impl Default for AppConfig {
@@ -37,6 +41,7 @@ impl Default for AppConfig {
             system_prompt: None,
             system_prompt_append: Vec::new(),
             no_context_files: false,
+            summarize_branches: true,
         }
     }
 }

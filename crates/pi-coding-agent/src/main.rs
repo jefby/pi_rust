@@ -225,6 +225,7 @@ async fn main() -> anyhow::Result<()> {
         system_prompt: cli.system_prompt.clone(),
         system_prompt_append: cli.append_system_prompt.clone(),
         no_context_files: cli.no_context_files,
+        summarize_branches: file_cfg.branch_summary.unwrap_or(true),
         ..AppConfig::default()
     };
 
@@ -247,7 +248,7 @@ async fn main() -> anyhow::Result<()> {
                 session::save(&app.config_dir, &mut new_session)?;
                 eprintln!(
                     "forked {} message(s) from {target} into new session {}",
-                    new_session.branch().len(),
+                    new_session.messages().len(),
                     new_session.id
                 );
                 Some(new_session)
@@ -363,7 +364,7 @@ fn run_sessions_cmd(app: &AppConfig, action: SessionAction) -> anyhow::Result<()
             let saved = session::save(&app.config_dir, &mut imported)?;
             eprintln!(
                 "imported {} message(s) from {path}",
-                imported.branch().len()
+                imported.messages().len()
             );
             eprintln!("saved as {}", saved.display());
             println!("{}", imported.id);
@@ -378,7 +379,7 @@ fn run_sessions_cmd(app: &AppConfig, action: SessionAction) -> anyhow::Result<()
             std::fs::write(&path, jsonl)?;
             eprintln!(
                 "exported {} message(s) to {}",
-                s.branch().len(),
+                s.messages().len(),
                 path.display()
             );
             Ok(())

@@ -23,7 +23,13 @@ pub struct Entry {
     pub parent_id: Option<String>,
     #[serde(default)]
     pub timestamp: i64,
-    pub message: Message,
+    /// Present for message entries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<Message>,
+    /// Original JSON for non-message entries (`model_change`, `custom`, ...),
+    /// kept so a round trip does not lose them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -126,11 +132,11 @@ impl Session {
         }
     }
 
-    /// Active branch as a flat transcript.
+    /// Active branch as a flat transcript (message entries only).
     pub fn messages(&self) -> Vec<Message> {
         self.branch()
             .into_iter()
-            .map(|e| e.message.clone())
+            .filter_map(|e| e.message.clone())
             .collect()
     }
 
@@ -145,7 +151,8 @@ impl Session {
             id: id.clone(),
             parent_id: self.active_leaf.clone(),
             timestamp: pi_ai::now_ms(),
-            message,
+            message: Some(message),
+            raw: None,
         });
         self.active_leaf = Some(id.clone());
         self.updated_ms = pi_ai::now_ms();
@@ -185,13 +192,12 @@ impl Session {
         while i < from.len() && i < to.len() && from[i].id == to[i].id {
             i += 1;
         }
-        from[i..].iter().map(|e| e.message.clone()).collect()
+        from[i..].iter().filter_map(|e| e.message.clone()).collect()
     }
 
-    /// Label items for the `/tree` overlay: `(entry id, depth, label)`.
-    /// Used by the `tui` feature.
+    /// Label items for the `/tree` overlay. Used by the `tui` feature.
     #[allow(dead_code)]
-    pub fn tree_items(&self) -> Vec<(String, usize, String)> {
+    pub fn tree_items(&self) -> Vec<TreeItem> {
         let mut depth: HashMap<&str, usize> = HashMap::new();
         let mut items = Vec::with_capacity(self.entries.len());
         for entry in &self.entries {
@@ -202,20 +208,35 @@ impl Session {
                 .map(|d| d + 1)
                 .unwrap_or(0);
             depth.insert(entry.id.as_str(), d);
-            items.push((entry.id.clone(), d, entry_label(&entry.message)));
+            items.push(TreeItem {
+                id: entry.id.clone(),
+                parent_id: entry.parent_id.clone(),
+                depth: d,
+                label: entry_label(entry),
+            });
         }
         items
     }
 }
 
+/// A row of the `/tree` overlay. Used by the `tui` feature.
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct TreeItem {
+    pub id: String,
+    pub parent_id: Option<String>,
+    pub depth: usize,
+    pub label: String,
+}
+
 // Entry labels for the `/tree` overlay; only used by the `tui` feature.
 #[allow(dead_code)]
-fn entry_label(message: &Message) -> String {
-    match message {
-        Message::User { content, .. } => {
+fn entry_label(entry: &Entry) -> String {
+    match &entry.message {
+        Some(Message::User { content, .. }) => {
             format!("❯ {}", truncate(&blocks_text(content), 60))
         }
-        Message::Assistant(a) => {
+        Some(Message::Assistant(a)) => {
             let text = blocks_text(&a.content);
             let tool = a.content.iter().find_map(|c| match c {
                 Content::ToolCall { name, .. } => Some(name.as_str()),
@@ -227,12 +248,21 @@ fn entry_label(message: &Message) -> String {
                 None => format!("  {}", truncate(&text, 60)),
             }
         }
-        Message::ToolResult(tr) => {
+        Some(Message::ToolResult(tr)) => {
             format!(
                 "    [{}: {}]",
                 tr.tool_name,
                 if tr.is_error { "error" } else { "ok" }
             )
+        }
+        None => {
+            let kind = entry
+                .raw
+                .as_ref()
+                .and_then(|v| v.get("type"))
+                .and_then(Value::as_str)
+                .unwrap_or("entry");
+            format!("  · {kind}")
         }
     }
 }
@@ -377,16 +407,9 @@ pub fn import(path: &Path) -> anyhow::Result<Session> {
 
 /// Parse an upstream `.jsonl` session into a [`Session`], keeping the tree.
 pub fn import_jsonl(path: &Path) -> anyhow::Result<Session> {
-    struct RawEntry {
-        id: String,
-        parent: Option<String>,
-        timestamp: i64,
-        message: Option<Message>,
-    }
-
     let text = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
 
-    let mut raw: Vec<RawEntry> = Vec::new();
+    let mut entries: Vec<Entry> = Vec::new();
     let mut header_id: Option<String> = None;
     let mut header_ts: Option<String> = None;
     for line in text.lines() {
@@ -407,9 +430,16 @@ pub fn import_jsonl(path: &Path) -> anyhow::Result<Session> {
         let Some(id) = value.get("id").and_then(Value::as_str).map(String::from) else {
             continue;
         };
-        raw.push(RawEntry {
+        let message = value.get("message").and_then(convert_message);
+        // Keep non-message entries verbatim so export can reproduce them.
+        let raw = if message.is_none() {
+            Some(value.clone())
+        } else {
+            None
+        };
+        entries.push(Entry {
             id,
-            parent: value
+            parent_id: value
                 .get("parentId")
                 .and_then(Value::as_str)
                 .map(String::from),
@@ -418,71 +448,18 @@ pub fn import_jsonl(path: &Path) -> anyhow::Result<Session> {
                 .and_then(Value::as_str)
                 .map(parse_ts_str)
                 .unwrap_or_else(pi_ai::now_ms),
-            message: value.get("message").and_then(convert_message),
+            message,
+            raw,
         });
     }
 
-    let index: HashMap<&str, &RawEntry> = raw.iter().map(|e| (e.id.as_str(), e)).collect();
-
-    // The active leaf is the nearest message ancestor of the last written
-    // entry (which may itself be a non-message entry).
-    let active_leaf = {
-        let mut leaf = None;
-        let mut cursor = raw.last().map(|e| e.id.clone());
-        let mut guard = 0usize;
-        while let Some(id) = cursor {
-            match index.get(id.as_str()).copied() {
-                Some(entry) if entry.message.is_some() => {
-                    leaf = Some(id.clone());
-                    break;
-                }
-                Some(entry) => cursor = entry.parent.clone(),
-                None => break,
-            }
-            guard += 1;
-            if guard > raw.len() {
-                break;
-            }
-        }
-        leaf
-    };
-
-    // Re-link each message entry to its nearest message ancestor, skipping
-    // non-message entries (model changes, custom entries, ...).
-    let resolve_parent = |mut parent: Option<String>| -> Option<String> {
-        let mut guard = 0usize;
-        while let Some(id) = parent {
-            match index.get(id.as_str()).copied() {
-                Some(entry) if entry.message.is_some() => return Some(id),
-                Some(entry) => parent = entry.parent.clone(),
-                None => return None,
-            }
-            guard += 1;
-            if guard > raw.len() {
-                return None;
-            }
-        }
-        None
-    };
-
-    let entries: Vec<Entry> = raw
-        .iter()
-        .filter_map(|entry| {
-            let message = entry.message.clone()?;
-            Some(Entry {
-                id: entry.id.clone(),
-                parent_id: resolve_parent(entry.parent.clone()),
-                timestamp: entry.timestamp,
-                message,
-            })
-        })
-        .collect();
+    let active_leaf = entries.last().map(|e| e.id.clone());
 
     let (model, provider) = entries
         .iter()
         .rev()
         .find_map(|e| match &e.message {
-            Message::Assistant(a) => Some((a.model.clone(), a.provider.clone())),
+            Some(Message::Assistant(a)) => Some((a.model.clone(), a.provider.clone())),
             _ => None,
         })
         .unwrap_or_default();
@@ -660,12 +637,21 @@ pub fn export_jsonl(session: &Session) -> anyhow::Result<String> {
     out.push('\n');
 
     for entry in &session.entries {
+        // Non-message entries are written back verbatim.
+        if let Some(raw) = &entry.raw {
+            out.push_str(&serde_json::to_string(raw)?);
+            out.push('\n');
+            continue;
+        }
+        let Some(message) = &entry.message else {
+            continue;
+        };
         let value = serde_json::json!({
             "type": "message",
             "id": entry.id,
             "parentId": entry.parent_id,
             "timestamp": iso(entry.timestamp),
-            "message": export_message(&entry.message),
+            "message": export_message(message),
         });
         out.push_str(&serde_json::to_string(&value)?);
         out.push('\n');
@@ -807,6 +793,7 @@ mod tests {
 
     const SAMPLE: &[&str] = &[
         r#"{"type":"session","version":3,"id":"sess-1","timestamp":"2026-05-01T00:00:00.000Z","cwd":"/tmp"}"#,
+        r#"{"type":"model_change","id":"m1","parentId":null,"timestamp":"2026-05-01T00:00:00.500Z","provider":"deepseek","modelId":"deepseek-v4-flash"}"#,
         r#"{"type":"message","id":"a","parentId":null,"timestamp":"2026-05-01T00:00:01.000Z","message":{"role":"user","content":[{"type":"text","text":"hi"}],"timestamp":"2026-05-01T00:00:01.000Z"}}"#,
         r#"{"type":"message","id":"b","parentId":"a","timestamp":"2026-05-01T00:00:02.000Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"p"},{"type":"text","text":"hello"},{"type":"toolCall","id":"c1","name":"read","arguments":{"path":"x"}}],"api":"openai-completions","provider":"deepseek","model":"deepseek-v4-flash","usage":{"input":10,"output":2,"cacheRead":1,"cacheWrite":0,"totalTokens":12,"cost":{"input":0.1,"output":0.2,"cacheRead":0.01,"cacheWrite":0,"total":0.31}},"stopReason":"toolUse","timestamp":"2026-05-01T00:00:02.000Z"}}"#,
         r#"{"type":"message","id":"c","parentId":"b","timestamp":"2026-05-01T00:00:03.000Z","message":{"role":"toolResult","toolCallId":"c1","toolName":"read","content":[{"type":"text","text":"contents"}],"isError":false,"timestamp":"2026-05-01T00:00:03.000Z"}}"#,
@@ -823,13 +810,14 @@ mod tests {
         let session = import_jsonl(&path).unwrap();
         assert_eq!(session.id, "sess-1");
         assert_eq!(session.provider, "deepseek");
-        // All four message entries are kept, including the second branch.
-        assert_eq!(session.entries.len(), 4);
+        // All entries are kept, including the model_change and the second branch.
+        assert_eq!(session.entries.len(), 5);
+        assert!(session.entries.iter().any(|e| e.raw.is_some()));
         // Active leaf is the last written entry ("d").
         assert_eq!(session.active_leaf.as_deref(), Some("d"));
         assert_eq!(session.messages().len(), 2);
         match &session.branch_to("c")[1].message {
-            Message::Assistant(a) => assert_eq!(a.stop_reason, StopReason::ToolUse),
+            Some(Message::Assistant(a)) => assert_eq!(a.stop_reason, StopReason::ToolUse),
             other => panic!("expected assistant, got {other:?}"),
         }
         std::fs::remove_dir_all(dir).ok();
@@ -847,6 +835,8 @@ mod tests {
         std::fs::write(&round, &out).unwrap();
         let back = import_jsonl(&round).unwrap();
         assert_eq!(back.entries.len(), session.entries.len());
+        // The non-message entry survives the round trip.
+        assert!(back.entries.iter().any(|e| e.raw.is_some()));
         // "b" and "d" share parent "a" in the round-tripped file.
         let b_parent = back
             .entries

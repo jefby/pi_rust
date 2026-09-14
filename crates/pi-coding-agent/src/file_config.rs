@@ -29,6 +29,9 @@
 //!
 //! # Default for the `--json` flag (JSON-lines in print mode).
 //! json = false
+//!
+//! # Summarize the abandoned branch when `/tree` switches branches.
+//! branch_summary = true
 //! ```
 
 use std::path::PathBuf;
@@ -52,6 +55,8 @@ pub struct FileConfig {
     /// Default for `--json` (JSON-lines in print mode).
     #[serde(default)]
     pub json: bool,
+    /// Whether `/tree` branch switches summarize the abandoned branch.
+    pub branch_summary: Option<bool>,
 }
 
 /// Path to the config file under the platform-appropriate config dir.

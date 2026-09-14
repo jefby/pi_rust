@@ -30,7 +30,7 @@ pub async fn run_interactive(
         eprintln!(
             "(resumed session {}, {} prior messages)",
             session.id,
-            session.branch().len()
+            session.messages().len()
         );
     }
 

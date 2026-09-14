@@ -66,11 +66,34 @@ enum TreeMode {
     Fork,
 }
 
-/// Tree overlay: `(entry id, depth, label)`.
+/// Tree overlay with fold/unfold support.
 struct TreeOverlay {
-    items: Vec<(String, usize, String)>,
+    items: Vec<crate::session::TreeItem>,
     selected: usize,
+    collapsed: std::collections::HashSet<String>,
     mode: TreeMode,
+}
+
+/// Indices of items whose ancestors are not collapsed.
+fn visible_indices(tree: &TreeOverlay) -> Vec<usize> {
+    let mut hidden: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut visible = Vec::new();
+    for (i, item) in tree.items.iter().enumerate() {
+        let parent_hidden = item
+            .parent_id
+            .as_deref()
+            .map(|p| hidden.contains(p) || tree.collapsed.contains(p))
+            .unwrap_or(false);
+        if parent_hidden {
+            hidden.insert(item.id.as_str());
+        } else {
+            visible.push(i);
+            if tree.collapsed.contains(&item.id) {
+                hidden.insert(item.id.as_str());
+            }
+        }
+    }
+    visible
 }
 
 struct State {
@@ -157,7 +180,7 @@ async fn run(
         state.push_system(format!(
             "(resumed session {}, {} prior messages)",
             state.session.id,
-            state.session.branch().len()
+            state.session.messages().len()
         ));
     }
     state.push_system(format!(
@@ -239,6 +262,8 @@ impl State {
             match key.code {
                 KeyCode::Up | KeyCode::Char('k') => self.tree_move(-1),
                 KeyCode::Down | KeyCode::Char('j') => self.tree_move(1),
+                KeyCode::Left | KeyCode::Char('h') => self.tree_collapse(),
+                KeyCode::Right | KeyCode::Char('l') => self.tree_expand(),
                 KeyCode::Enter => self.tree_confirm(ui_tx),
                 KeyCode::Esc => self.tree = None,
                 _ => {}
@@ -537,7 +562,7 @@ impl State {
                 self.push_system(format!(
                     "(resumed session {}, {} prior messages)",
                     self.session.id,
-                    self.session.branch().len()
+                    self.session.messages().len()
                 ));
             }
             Err(e) => {
@@ -550,7 +575,7 @@ impl State {
     fn open_tree(&mut self, mode: TreeMode) {
         let mut items = self.session.tree_items();
         if mode == TreeMode::Fork {
-            items.retain(|(_, _, label)| label.starts_with('❯'));
+            items.retain(|item| item.label.starts_with('❯'));
         }
         if items.is_empty() {
             self.push_system("(no entries to choose from)".to_string());
@@ -559,23 +584,55 @@ impl State {
         let selected = match (mode, self.session.active_leaf.as_deref()) {
             (TreeMode::Switch, Some(leaf)) => items
                 .iter()
-                .position(|(id, _, _)| id == leaf)
+                .position(|item| item.id == leaf)
                 .unwrap_or(items.len() - 1),
             _ => 0,
         };
         self.tree = Some(TreeOverlay {
             items,
             selected,
+            collapsed: Default::default(),
             mode,
         });
     }
 
     fn tree_move(&mut self, delta: isize) {
+        let Some(tree) = &self.tree else {
+            return;
+        };
+        let visible = visible_indices(tree);
+        let position = visible
+            .iter()
+            .position(|&i| i == tree.selected)
+            .unwrap_or(0);
+        let next = (position as isize + delta).rem_euclid(visible.len().max(1) as isize) as usize;
+        let new_selected = visible[next];
         if let Some(tree) = &mut self.tree {
-            let len = tree.items.len() as isize;
-            if len > 0 {
-                tree.selected = (tree.selected as isize + delta).rem_euclid(len) as usize;
+            tree.selected = new_selected;
+        }
+    }
+
+    fn tree_collapse(&mut self) {
+        if let Some(tree) = &mut self.tree {
+            let id = tree.items[tree.selected].id.clone();
+            let has_children = tree
+                .items
+                .iter()
+                .any(|item| item.parent_id.as_deref() == Some(id.as_str()));
+            if has_children {
+                tree.collapsed.insert(id);
+            } else if let Some(parent) = tree.items[tree.selected].parent_id.clone() {
+                if let Some(idx) = tree.items.iter().position(|item| item.id == parent) {
+                    tree.selected = idx;
+                }
             }
+        }
+    }
+
+    fn tree_expand(&mut self) {
+        if let Some(tree) = &mut self.tree {
+            let id = tree.items[tree.selected].id.clone();
+            tree.collapsed.remove(&id);
         }
     }
 
@@ -583,9 +640,7 @@ impl State {
         let Some(tree) = self.tree.take() else {
             return;
         };
-        let Some((id, _, _)) = tree.items.get(tree.selected).cloned() else {
-            return;
-        };
+        let id = tree.items[tree.selected].id.clone();
 
         match tree.mode {
             TreeMode::Switch => {
@@ -596,10 +651,10 @@ impl State {
                 self.replay_history();
                 self.push_system(format!(
                     "(switched to {} messages)",
-                    self.session.branch().len()
+                    self.session.messages().len()
                 ));
                 self.save();
-                if !abandoned.is_empty() {
+                if !abandoned.is_empty() && self.app.summarize_branches {
                     self.push_system("(summarizing abandoned branch…)".to_string());
                     let app = self.app.clone();
                     let ui = ui_tx.clone();
@@ -609,6 +664,11 @@ impl State {
                             .map_err(|e| e.to_string());
                         let _ = ui.send(UiEvent::BranchSummary(result));
                     });
+                } else if !abandoned.is_empty() {
+                    self.push_system(format!(
+                        "({} abandoned message(s); branch summary disabled)",
+                        abandoned.len()
+                    ));
                 }
             }
             TreeMode::Fork => {
@@ -618,7 +678,7 @@ impl State {
                     .iter()
                     .find(|e| e.id == id)
                     .map(|e| match &e.message {
-                        Message::User { content, .. } => content
+                        Some(Message::User { content, .. }) => content
                             .iter()
                             .filter_map(|c| c.as_text())
                             .collect::<Vec<_>>()
@@ -638,7 +698,7 @@ impl State {
                         self.session
                             .branch_to(p)
                             .into_iter()
-                            .map(|e| e.message.clone())
+                            .filter_map(|e| e.message.clone())
                             .collect()
                     })
                     .unwrap_or_default();
@@ -1036,15 +1096,31 @@ impl State {
         let popup = centered_rect(84, 74, area);
         frame.render_widget(Clear, popup);
         let inner_height = popup.height.saturating_sub(2) as usize;
-        let start = tree.selected.saturating_sub(inner_height.saturating_sub(1));
-        let lines: Vec<Line> = tree
-            .items
+        let visible = visible_indices(tree);
+        let position = visible
             .iter()
-            .enumerate()
-            .skip(start)
-            .take(inner_height)
-            .map(|(i, (_, depth, label))| {
-                let text = format!("{}{}", "  ".repeat(*depth), label);
+            .position(|&i| i == tree.selected)
+            .unwrap_or(0);
+        let start = position.saturating_sub(inner_height.saturating_sub(1));
+        let shown = &visible[start..visible.len().min(start + inner_height)];
+        let lines: Vec<Line> = shown
+            .iter()
+            .map(|&i| {
+                let item = &tree.items[i];
+                let has_children = tree
+                    .items
+                    .iter()
+                    .any(|child| child.parent_id.as_deref() == Some(item.id.as_str()));
+                let marker = if has_children {
+                    if tree.collapsed.contains(&item.id) {
+                        "▸ "
+                    } else {
+                        "▾ "
+                    }
+                } else {
+                    "  "
+                };
+                let text = format!("{}{}{}", "  ".repeat(item.depth), marker, item.label);
                 if i == tree.selected {
                     Line::styled(
                         text,
@@ -1059,7 +1135,7 @@ impl State {
             })
             .collect();
         let title = match tree.mode {
-            TreeMode::Switch => " session tree   ↑/↓ · Enter switch · Esc cancel ",
+            TreeMode::Switch => " session tree   ↑/↓ · ←/→ fold · Enter switch · Esc cancel ",
             TreeMode::Fork => " fork from a user message   ↑/↓ · Enter fork · Esc cancel ",
         };
         let block = Block::bordered()
@@ -1463,7 +1539,7 @@ mod tests {
         state.picker_confirm();
         assert!(state.picker.is_none());
         assert_eq!(state.session.id, saved.id);
-        assert_eq!(state.session.branch().len(), 1);
+        assert_eq!(state.session.messages().len(), 1);
         std::fs::remove_dir_all(dir).ok();
     }
 
@@ -1491,7 +1567,7 @@ mod tests {
         assert_eq!(state.tree.as_ref().unwrap().selected, 1);
         state.tree_confirm(&tx);
         assert!(state.tree.is_none());
-        assert_eq!(state.session.branch().len(), 2);
+        assert_eq!(state.session.messages().len(), 2);
     }
 
     #[test]
@@ -1512,5 +1588,22 @@ mod tests {
         assert_ne!(state.session.id, original_id);
         assert_eq!(state.session.messages().len(), 2);
         assert_eq!(state.input, "second");
+    }
+
+    #[test]
+    fn tree_fold_hides_children() {
+        let mut state = test_state();
+        state.session.push_message(Message::user_text("a"));
+        state.session.push_message(assistant("b"));
+        state.session.push_message(Message::user_text("c"));
+        state.open_tree(TreeMode::Switch);
+        assert_eq!(visible_indices(state.tree.as_ref().unwrap()).len(), 3);
+
+        state.tree.as_mut().unwrap().selected = 0;
+        state.tree_collapse();
+        assert_eq!(visible_indices(state.tree.as_ref().unwrap()).len(), 1);
+
+        state.tree_expand();
+        assert_eq!(visible_indices(state.tree.as_ref().unwrap()).len(), 3);
     }
 }

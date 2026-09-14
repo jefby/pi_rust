@@ -35,10 +35,10 @@ it enabled.
 ## Session tree
 
 `/tree` opens an overlay of the current session's entries (indented by depth);
-`↑`/`↓` select, `Enter` switches the active leaf to that entry (and summarizes
-the branch you left), `Esc` cancels. `/fork` opens the same overlay restricted
-to user messages and starts a new session from the selected one, with that
-prompt placed back in the input. See
+`↑`/`↓` select, `←`/`→` fold/unfold a subtree, `Enter` switches the active leaf
+to that entry (and summarizes the branch you left), `Esc` cancels. `/fork` opens
+the same overlay restricted to user messages and starts a new session from the
+selected one, with that prompt placed back in the input. See
 [Sessions](./sessions.md#branching-session-tree).
 
 The conversation pane renders model reasoning (thinking deltas) dimmed and

@@ -47,10 +47,12 @@ the target's active branch into a new session and opens it.
 When `/tree` switches away from a branch, the abandoned segment is summarized
 with the model and attached at the new position as a `[branch summary]`
 message, so context from the path you left is preserved without replaying it.
+Disable this with `branch_summary = false` in `config.toml`.
 
 Upstream `.jsonl` sessions keep their **full tree** on import, and export
-writes the tree back (`parentId` links preserved), so branches survive a
-round trip.
+writes the tree back (`parentId` links preserved). Non-message entries
+(`model_change`, `thinking_level_change`, `custom`, ...) are stored verbatim so
+they survive a round trip too.
 
 ## When sessions are saved
 
