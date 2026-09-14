@@ -7,6 +7,7 @@
 - [Parity with upstream](./parity.md)
 - [CLI](./cli/print-mode.md)
   - [Print mode](./cli/print-mode.md)
+  - [Options](./cli/options.md)
   - [Interactive](./cli/interactive.md)
   - [TUI](./cli/tui.md)
   - [Sessions](./cli/sessions.md)

@@ -26,10 +26,15 @@ it enabled.
 | Key | Action |
 |-----|--------|
 | `Enter` | send the message |
+| `Shift+Enter` | insert a newline (multi-line input) |
 | `PageUp` / `PageDown` / `Up` / `Down` | scroll the conversation |
 | `Ctrl+C` | quit |
 | `Ctrl+D` | quit when the input is empty |
 | `y` / `a` / `n` | answer a permission prompt (allow / allow session / deny) |
+
+The conversation pane renders model reasoning (thinking deltas) dimmed and
+italic, applies light Markdown styling to assistant messages (fenced code
+blocks, headings, `**bold**`, inline `code`), and shows tool runs inline.
 
 ## Slash commands
 

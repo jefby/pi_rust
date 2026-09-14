@@ -57,6 +57,14 @@ pub fn load(config_dir: &Path, id: &str) -> anyhow::Result<Session> {
     Ok(s)
 }
 
+/// Load the most recently updated session, if any.
+pub fn latest(config_dir: &Path) -> anyhow::Result<Option<Session>> {
+    match list(config_dir)?.first() {
+        Some(summary) => Ok(Some(load(config_dir, &summary.id)?)),
+        None => Ok(None),
+    }
+}
+
 pub fn list(config_dir: &Path) -> anyhow::Result<Vec<SessionSummary>> {
     let dir = sessions_dir(config_dir);
     if !dir.exists() {

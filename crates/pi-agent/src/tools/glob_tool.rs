@@ -8,7 +8,8 @@ pub struct GlobTool;
 #[async_trait]
 impl AgentTool for GlobTool {
     fn name(&self) -> &str {
-        "glob"
+        // Named `find` to match the upstream builtin tool.
+        "find"
     }
     fn description(&self) -> &str {
         "Expand a glob pattern (e.g. 'src/**/*.rs') and return matching paths."

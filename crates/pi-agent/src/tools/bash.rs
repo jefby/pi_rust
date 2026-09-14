@@ -30,7 +30,7 @@ enum ShellKind {
 /// Resolved shell used to execute commands. Detection happens once when the
 /// tool is constructed so the agent keeps a stable shell for the whole run.
 #[derive(Debug, Clone)]
-struct Shell {
+pub(crate) struct Shell {
     program: OsString,
     kind: ShellKind,
 }
@@ -78,6 +78,24 @@ impl Shell {
             program: OsString::from("cmd.exe"),
             kind: ShellKind::Cmd,
         }
+    }
+
+    /// A PowerShell shell, if one is installed. Used by the `powershell` tool;
+    /// returns `None` on non-Windows hosts.
+    #[cfg(windows)]
+    pub(crate) fn powershell() -> Option<Self> {
+        ["pwsh.exe", "pwsh", "powershell.exe", "powershell"]
+            .into_iter()
+            .find(|program| find_in_path(program).is_some())
+            .map(|program| Self {
+                program: OsString::from(program),
+                kind: ShellKind::PowerShell,
+            })
+    }
+
+    #[cfg(not(windows))]
+    pub(crate) fn powershell() -> Option<Self> {
+        None
     }
 
     /// Build a `Command` that runs `cmd` in this shell.
@@ -208,8 +226,12 @@ pub struct BashTool {
 
 impl BashTool {
     pub fn new() -> Self {
+        Self::with_shell(Shell::detect())
+    }
+
+    /// Build a tool around an explicit shell. Used by the `powershell` tool.
+    pub(crate) fn with_shell(shell: Shell) -> Self {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let shell = Shell::detect();
         let description = format!(
             "Run a shell command via `{}`. Returns combined stdout/stderr and exit code, and `cd <path>` to change persistent cwd.",
             shell.invocation()

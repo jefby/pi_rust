@@ -14,6 +14,8 @@
       `text_delta` / `thinking_delta` / `toolcall_delta` as they arrive.
 - [x] **SSE parsing for OpenAI Chat Completions** (`stream: true`,
       `stream_options.include_usage: true`).
+- [x] Surface model reasoning on OpenAI-compatible providers
+      (`reasoning_content` / `reasoning`) as `thinking_delta`.
 - [x] Surface `Usage` deltas; aggregate the final usage into the
       `AssistantMessage`.
 - [x] Cancellation: thread a `CancellationToken` through the stream so
@@ -33,12 +35,17 @@
 - [x] **Config file** at `$XDG_CONFIG_HOME/pi/config.toml` (delivered in 1.2.0).
 - [x] `/compact` (auto-summarize context to free room) — delivered in 1.2.0.
 - [x] **Optional full-screen TUI** built on `ratatui`/`crossterm`
-      (`--features tui`) — basic chat, streaming, permission modal.
+      (`--features tui`) — chat, streaming, multi-line input, dimmed
+      reasoning, light Markdown, permission modal.
 
 ## Milestone 3 — Tool ecosystem ✅ (mostly delivered in 1.0.0)
 
 - [x] **Per-call permission prompts** with allow / allow-session / deny.
 - [x] **New tools**: `web_fetch`, `todo`.
+- [x] Rename `glob` → `find`; add the Windows `powershell` tool.
+- [x] **CLI parity**: `--thinking`, `--continue`, `--provider`, `--api-key`,
+      `--system-prompt`, `--append-system-prompt`, `--no-context-files`,
+      `--list-models`; `SYSTEM.md` / `APPEND_SYSTEM.md` loading.
 - [x] **`bash` improvements**: streamed stdout/stderr, persisted cwd (1.2.0).
 - [x] **`edit` polish**: unified-diff preview before write (1.2.0).
 - [x] **`grep` upgrade**: regex mode, context lines (1.2.0).

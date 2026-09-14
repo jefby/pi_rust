@@ -23,7 +23,7 @@ pub async fn run_print(
     permission: Arc<dyn PermissionPolicy>,
     json_mode: bool,
 ) -> anyhow::Result<()> {
-    let cfg = AgentConfig::new(app.model.clone(), build_system_prompt(&app.config_dir))
+    let cfg = AgentConfig::new(app.model.clone(), build_system_prompt(app))
         .with_tools(default_tools())
         .with_max_turns(app.max_turns)
         .with_thinking(app.thinking_level)

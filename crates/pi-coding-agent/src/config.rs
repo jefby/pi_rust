@@ -15,6 +15,12 @@ pub struct AppConfig {
     /// API key resolved from the upstream `~/.pi/agent` config, if any. It is
     /// injected into `StreamOptions` so providers prefer it over their env var.
     pub api_key: Option<String>,
+    /// `--system-prompt`: replaces the default system prompt.
+    pub system_prompt: Option<String>,
+    /// `--append-system-prompt` (repeatable).
+    pub system_prompt_append: Vec<String>,
+    /// `--no-context-files`: skip AGENTS.md / CLAUDE.md discovery.
+    pub no_context_files: bool,
 }
 
 impl Default for AppConfig {
@@ -28,6 +34,9 @@ impl Default for AppConfig {
             thinking_level: ThinkingLevel::Off,
             config_dir,
             api_key: None,
+            system_prompt: None,
+            system_prompt_append: Vec::new(),
+            no_context_files: false,
         }
     }
 }
@@ -178,6 +187,110 @@ fn resolve_from_home(explicit: Option<&str>, home: &AgentHome) -> Option<Resolve
         max_tokens,
     );
     let api_key = home.api_key(&provider);
+    Some(ResolvedModel { model, api_key })
+}
+
+/// Built-in models the port knows how to run without any upstream config.
+pub fn builtin_models() -> Vec<Model> {
+    vec![
+        Model::anthropic_claude_sonnet_4_6(),
+        Model::anthropic_claude_opus_4_7(),
+        Model::openai_gpt_4o(),
+        Model::openai_gpt_4o_mini(),
+        Model::openai_gpt_5(),
+        Model::gemini_2_0_flash(),
+    ]
+}
+
+/// `provider/model` ids available from the built-ins plus the upstream config,
+/// filtered by a case-insensitive substring `search` and sorted.
+pub fn list_models(search: &str, home: Option<&AgentHome>) -> Vec<String> {
+    let mut entries: Vec<String> = builtin_models()
+        .into_iter()
+        .map(|m| format!("{}/{}", m.provider, m.id))
+        .collect();
+
+    if let Some(home) = home {
+        if let (Some(provider), Some(model)) = (
+            &home.settings.default_provider,
+            &home.settings.default_model,
+        ) {
+            entries.push(format!("{provider}/{model}"));
+        }
+        for (name, provider) in &home.providers {
+            for model in &provider.models {
+                entries.push(format!("{name}/{}", model.id));
+            }
+        }
+    }
+
+    let needle = search.trim().to_lowercase();
+    let mut seen = std::collections::BTreeSet::new();
+    entries.retain(|entry| {
+        seen.insert(entry.clone()) && (needle.is_empty() || entry.to_lowercase().contains(&needle))
+    });
+    entries.sort();
+    entries
+}
+
+/// Build a model for an explicitly requested provider (`--provider`).
+///
+/// `api` + base URL come from the upstream `models.json` custom provider or the
+/// built-in table; the model id is `--model` if given, else the custom
+/// provider's first model, else the upstream default model when it belongs to
+/// this provider.
+pub fn resolve_provider(
+    provider: &str,
+    explicit_model: Option<&str>,
+    home: Option<&AgentHome>,
+) -> Option<ResolvedModel> {
+    let custom = home.and_then(|h| h.custom_provider(provider));
+    let builtin = builtin_provider(provider);
+
+    let api = custom
+        .and_then(|p| non_empty(p.api.as_deref()))
+        .or_else(|| builtin.map(|(api, _)| api.to_string()))?;
+    let base_url = custom
+        .and_then(|p| non_empty(p.base_url.as_deref()))
+        .or_else(|| builtin.map(|(_, url)| url.to_string()))?;
+
+    let model_id = explicit_model
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .or_else(|| custom.and_then(|p| p.models.first().map(|m| m.id.clone())))
+        .or_else(|| {
+            home.and_then(|h| {
+                let settings = &h.settings;
+                match (
+                    settings.default_provider.as_deref(),
+                    settings.default_model.as_deref(),
+                ) {
+                    (Some(p), Some(m)) if p == provider => Some(m.to_string()),
+                    _ => None,
+                }
+            })
+        })?;
+
+    let (context_window, max_tokens) = custom
+        .and_then(|p| p.models.iter().find(|m| m.id == model_id))
+        .map(|m| {
+            (
+                m.context_window.unwrap_or(200_000),
+                m.max_tokens.unwrap_or(8_192),
+            )
+        })
+        .unwrap_or((200_000, 8_192));
+
+    let model = build_model(
+        provider,
+        &model_id,
+        &api,
+        &base_url,
+        context_window,
+        max_tokens,
+    );
+    let api_key = home.and_then(|h| h.api_key(provider));
     Some(ResolvedModel { model, api_key })
 }
 

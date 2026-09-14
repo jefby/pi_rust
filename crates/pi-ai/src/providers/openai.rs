@@ -45,6 +45,12 @@ struct ChunkChoice {
 struct ChunkDelta {
     #[serde(default)]
     content: Option<String>,
+    /// DeepSeek / some OpenAI-compatible providers stream reasoning here.
+    #[serde(default)]
+    reasoning_content: Option<String>,
+    /// OpenRouter uses `reasoning` instead.
+    #[serde(default)]
+    reasoning: Option<String>,
     #[serde(default)]
     tool_calls: Vec<ToolCallDelta>,
 }
@@ -285,6 +291,8 @@ impl Provider for OpenAiProvider {
             let mut text_buf = String::new();
             let mut text_started = false;
             let mut text_index: usize = 0;
+            let mut thinking_buf = String::new();
+            let mut thinking_started = false;
             let mut tool_calls: std::collections::BTreeMap<usize, PartialToolCall> = Default::default();
             let mut tool_started: std::collections::BTreeSet<usize> = Default::default();
             let mut stop = StopReason::Stop;
@@ -330,10 +338,27 @@ impl Provider for OpenAiProvider {
                         };
                     }
                     if let Some(delta) = choice.delta {
+                        let reasoning = delta.reasoning_content.or(delta.reasoning);
+                        if let Some(r) = reasoning {
+                            if !r.is_empty() {
+                                if !thinking_started {
+                                    thinking_started = true;
+                                    yield Ok(AssistantMessageEvent::ThinkingStart {
+                                        content_index: 0,
+                                    });
+                                }
+                                thinking_buf.push_str(&r);
+                                yield Ok(AssistantMessageEvent::ThinkingDelta {
+                                    content_index: 0,
+                                    delta: r,
+                                });
+                            }
+                        }
                         if let Some(c) = delta.content {
                             if !c.is_empty() {
                                 if !text_started {
                                     text_started = true;
+                                    text_index = if thinking_started { 1 } else { 0 };
                                     yield Ok(AssistantMessageEvent::TextStart { content_index: text_index });
                                 }
                                 text_buf.push_str(&c);
@@ -352,7 +377,7 @@ impl Provider for OpenAiProvider {
                                     entry.args.push_str(&a);
                                     if !tool_started.contains(&tc.index) {
                                         tool_started.insert(tc.index);
-                                        let block_index = text_index
+                                        let block_index = if thinking_started { 1 } else { 0 }
                                             + if text_started { 1 } else { 0 }
                                             + tool_started.len()
                                             - 1;
@@ -362,7 +387,7 @@ impl Provider for OpenAiProvider {
                                             name: entry.name.clone(),
                                         });
                                     }
-                                    let block_index = text_index
+                                    let block_index = if thinking_started { 1 } else { 0 }
                                         + if text_started { 1 } else { 0 }
                                         + tc.index;
                                     yield Ok(AssistantMessageEvent::ToolCallDelta {
@@ -376,15 +401,29 @@ impl Provider for OpenAiProvider {
                 }
             }
 
+            if thinking_started {
+                yield Ok(AssistantMessageEvent::ThinkingEnd {
+                    content_index: 0,
+                    content: thinking_buf.clone(),
+                });
+            }
+
             if text_started {
                 yield Ok(AssistantMessageEvent::TextEnd {
                     content_index: text_index,
                     content: text_buf.clone(),
                 });
-                text_index += 1;
             }
 
+            let tool_base = if thinking_started { 1 } else { 0 }
+                + if text_started { 1 } else { 0 };
             let mut out_content: Vec<Content> = Vec::new();
+            if thinking_started {
+                out_content.push(Content::Thinking {
+                    thinking: thinking_buf.clone(),
+                    thinking_signature: None,
+                });
+            }
             if text_started {
                 out_content.push(Content::Text { text: text_buf.clone() });
             }
@@ -394,7 +433,7 @@ impl Provider for OpenAiProvider {
                 } else {
                     serde_json::from_str(&tc.args).unwrap_or(Value::Object(Default::default()))
                 };
-                let block_index = text_index + i;
+                let block_index = tool_base + i;
                 yield Ok(AssistantMessageEvent::ToolCallEnd {
                     content_index: block_index,
                     id: tc.id.clone(),

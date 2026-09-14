@@ -24,8 +24,8 @@ Legend: ✅ parity · 🟡 partial · ❌ missing · ➕ Rust-only extra
 | `bash` | ✅ | ✅ (streamed, persisted cwd, shell auto-detect) |
 | `ls` | ✅ | ✅ |
 | `grep` | ✅ | ✅ (regex + context lines) |
-| `find` (glob) | ✅ | 🟡 ported as `glob` |
-| `powershell` | ✅ | ❌ |
+| `find` (glob) | ✅ | ✅ (tool is named `find`) |
+| `powershell` | ✅ | 🟡 Windows only |
 | `web_fetch` | ❌ (extension) | ➕ |
 | `todo` | ❌ (extension) | ➕ |
 
@@ -61,11 +61,11 @@ Kimi, ...) works. It does **not** add provider-specific behavior.
 |---|-----------------|------------|
 | Subcommands | `install`, `remove`, `uninstall`, `update`, `list`, `config`, `auth` | `sessions list/show/delete` |
 | Output modes | `text`, `json`, `rpc` | text, `--json` (print mode) |
-| Options | ~40 | 7 (`-p`, `-m`, `--max-turns`, `--yolo`, `--json`, `--resume`, `--version`) |
+| Options | ~40 | ~14 (see [Options](./cli/options.md)) |
 | Provider/model selection | `--provider`, `--model <pattern>` (glob/`provider/id`), `--models`, `--list-models` | `-m` / `PI_MODEL` (alias or upstream default) |
 | Tools control | `--tools`, `--exclude-tools`, `--no-tools`, `--no-builtin-tools` | ❌ |
-| System prompt | `--system-prompt`, `--append-system-prompt` | ❌ |
-| Sessions | `--continue`, `--resume`, `--session`, `--session-id`, `--fork`, `--session-dir`, `--no-session`, `--name` | `--resume <id>` |
+| System prompt | `--system-prompt`, `--append-system-prompt` | ✅ |
+| Sessions | `--continue`, `--resume`, `--session`, `--session-id`, `--fork`, `--session-dir`, `--no-session`, `--name` | 🟡 `--resume <id>`, `--continue` |
 | Resources | `--extension`, `--skill`, `--prompt-template`, `--theme`, `--no-*` | ❌ |
 | Other | `--export` (HTML), `--offline`, `--verbose`, `--approve`, `--tui-mode` | ❌ |
 
@@ -116,9 +116,10 @@ Kimi, ...) works. It does **not** add provider-specific behavior.
 ## Rust-only extras
 
 - `web_fetch` and `todo` built-in tools.
-- `glob` tool (upstream calls it `find`).
-- Windows shell auto-detection (Git Bash → PowerShell → `cmd.exe`).
-- Optional full-screen TUI built on `ratatui` + `crossterm` (`--features tui`).
+- Windows shell auto-detection (Git Bash → PowerShell → `cmd.exe`) and a
+  dedicated `powershell` tool.
+- Optional full-screen TUI built on `ratatui` + `crossterm` (`--features tui`),
+  including multi-line input, dimmed reasoning, and light Markdown rendering.
 - `--yolo` / `--json` print mode conveniences.
 
 ## Out of scope (no plans)

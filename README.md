@@ -29,7 +29,7 @@ pi/
 |------------|-----------|--------|
 | `@earendil-works/pi-ai` | `pi-ai` | **SSE streaming** for Anthropic Messages, OpenAI Chat Completions, Google Generative AI. Retry with `Retry-After`. Cancellation token. Custom headers. OpenAI-compatible passthrough (OpenRouter, Groq, etc.). |
 | `@earendil-works/pi-agent-core` | `pi-agent` | Streaming `run_agent` loop with per-tool permission gate, typed `AgentError`, `#[instrument]` spans. Builtin tools: `read`, `write`, `edit`, `bash`, `ls`, `grep`, `glob`, `web_fetch`, `todo`. |
-| `@earendil-works/pi-coding-agent` | `pi-coding-agent` | `pi` CLI: print mode (`-p`), interactive REPL with streaming render, **session persistence** + `--resume`, **AGENTS.md / CLAUDE.md loader**, slash commands (`/help /reset /model /tools /cost /sessions /resume /session`), interactive permission prompts (`--yolo` to skip). Optional full-screen TUI (`--features tui`). `pi sessions list/show/delete` subcommand. |
+| `@earendil-works/pi-coding-agent` | `pi-coding-agent` | `pi` CLI: print mode (`-p`), interactive REPL with streaming render, **session persistence** + `--resume` / `--continue`, **AGENTS.md / CLAUDE.md loader**, `SYSTEM.md` / `APPEND_SYSTEM.md`, slash commands (`/help /reset /model /tools /cost /sessions /resume /session`), interactive permission prompts (`--yolo` to skip), model/provider selection (`--provider`, `--list-models`, `--thinking`). Optional full-screen TUI (`--features tui`) with multi-line input, reasoning display, and light Markdown. `pi sessions list/show/delete` subcommand. |
 | `@earendil-works/pi-tui` | — | Not ported (TS terminal renderer). |
 | `@earendil-works/pi-web-ui` | — | Not ported (browser components). |
 

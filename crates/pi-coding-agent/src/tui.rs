@@ -57,6 +57,7 @@ struct State {
     system_prompt: String,
     lines: Vec<Line<'static>>,
     streaming: String,
+    thinking: String,
     input: String,
     cursor: usize,
     follow: bool,
@@ -69,6 +70,9 @@ struct State {
 }
 
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+/// Maximum number of text rows the input box grows to before it scrolls.
+const MAX_INPUT_ROWS: usize = 6;
 
 /// Run the TUI until the user quits.
 pub async fn run_tui(
@@ -97,9 +101,10 @@ async fn run(
         app: app.clone(),
         permission,
         session,
-        system_prompt: build_system_prompt(&app.config_dir),
+        system_prompt: build_system_prompt(app),
         lines: Vec::new(),
         streaming: String::new(),
+        thinking: String::new(),
         input: String::new(),
         cursor: 0,
         follow: true,
@@ -195,7 +200,11 @@ impl State {
 
         match key.code {
             KeyCode::Enter => {
-                if self.busy {
+                if key.modifiers.contains(KeyModifiers::SHIFT) {
+                    let idx = self.byte_index();
+                    self.input.insert(idx, '\n');
+                    self.cursor += 1;
+                } else if self.busy {
                     self.push_system("(still working…)".to_string());
                 } else {
                     self.start_submit(ui_tx);
@@ -324,7 +333,12 @@ impl State {
                 self.streaming.push_str(&delta);
                 self.follow = true;
             }
+            AgentEvent::ThinkingDelta { delta } => {
+                self.thinking.push_str(&delta);
+                self.follow = true;
+            }
             AgentEvent::AssistantMessage { message } => {
+                self.flush_thinking();
                 self.streaming.clear();
                 if let Message::Assistant(a) = &message {
                     let mut text = String::new();
@@ -371,6 +385,7 @@ impl State {
             let text = std::mem::take(&mut self.streaming);
             self.push_assistant(text);
         }
+        self.flush_thinking();
         self.busy = false;
     }
 
@@ -420,8 +435,24 @@ impl State {
     }
 
     fn push_assistant(&mut self, text: String) {
+        for line in markdown_lines(&text) {
+            self.push_line(line);
+        }
+    }
+
+    fn push_thinking(&mut self, text: String) {
+        let style = Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::ITALIC);
         for l in text.split('\n') {
-            self.push_line(Line::from(l.to_string()));
+            self.push_line(Line::styled(l.to_string(), style));
+        }
+    }
+
+    fn flush_thinking(&mut self) {
+        if !self.thinking.is_empty() {
+            let text = std::mem::take(&mut self.thinking);
+            self.push_thinking(text);
         }
     }
 
@@ -446,10 +477,14 @@ impl State {
 
     fn render(&mut self, frame: &mut ratatui::Frame) {
         let area = frame.area();
+        let input_rows = self
+            .input_layout(area.width.saturating_sub(2))
+            .0
+            .clamp(1, MAX_INPUT_ROWS);
         let chunks = Layout::vertical([
             Constraint::Length(1),
             Constraint::Min(1),
-            Constraint::Length(3),
+            Constraint::Length(input_rows as u16 + 2),
             Constraint::Length(1),
         ])
         .split(area);
@@ -489,6 +524,14 @@ impl State {
 
     fn render_chat(&mut self, frame: &mut ratatui::Frame, area: Rect) {
         let mut lines = self.lines.clone();
+        if !self.thinking.is_empty() {
+            let style = Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::ITALIC);
+            for l in self.thinking.split('\n') {
+                lines.push(Line::styled(l.to_string(), style));
+            }
+        }
         if !self.streaming.is_empty() {
             for l in self.streaming.split('\n') {
                 lines.push(Line::from(l.to_string()));
@@ -515,58 +558,60 @@ impl State {
         let title = if self.busy {
             " message (busy) "
         } else {
-            " message "
+            " message (Shift+Enter newline) "
         };
         let inner_width = area.width.saturating_sub(2);
-        let (visible, column) = self.input_view(inner_width);
-        let paragraph = Paragraph::new(visible).block(Block::bordered().title(title));
+        let inner_height = area.height.saturating_sub(2) as usize;
+        let (_, cursor_row, cursor_col) = self.input_layout(inner_width);
+        let paragraph = Paragraph::new(self.input.clone())
+            .block(Block::bordered().title(title))
+            .wrap(Wrap { trim: false });
         frame.render_widget(paragraph, area);
-        if self.pending_perm.is_none() {
+        if self.pending_perm.is_none() && cursor_row < inner_height {
             let x = area
                 .x
                 .saturating_add(1)
-                .saturating_add(column)
+                .saturating_add(cursor_col as u16)
                 .min(area.x + area.width.saturating_sub(2));
-            frame.set_cursor_position(Position::new(x, area.y + 1));
+            frame.set_cursor_position(Position::new(x, area.y + 1 + cursor_row as u16));
         }
     }
 
-    /// Slice of the input that fits `width` display columns, plus the
-    /// cursor's column within it. Uses display width so wide (CJK) characters
-    /// and the terminal's IME preedit anchor line up correctly, and scrolls
-    /// horizontally when the line overflows.
-    fn input_view(&self, width: u16) -> (String, u16) {
-        let width = width.max(1) as usize;
-        let chars: Vec<char> = self.input.chars().collect();
-        let widths: Vec<usize> = chars
-            .iter()
-            .map(|c| UnicodeWidthChar::width(*c).unwrap_or(0))
-            .collect();
-
-        // Move the window start right until the cursor is on screen.
-        let mut start = 0usize;
-        while start < self.cursor {
-            let before: usize = widths[start..self.cursor].iter().sum();
-            if before < width {
-                break;
+    /// Wrapped layout of the input: `(rows, cursor_row, cursor_col)` in display
+    /// columns, so wide (CJK) characters and multi-line input keep the cursor
+    /// and the terminal's IME anchor aligned. Explicit `\n` starts a row;
+    /// exceeding `inner_width` wraps to the next one.
+    fn input_layout(&self, inner_width: u16) -> (usize, usize, usize) {
+        let width = inner_width.max(1) as usize;
+        let total = self.input.chars().count();
+        let mut rows = 1usize;
+        let mut row = 0usize;
+        let mut col = 0usize;
+        let mut cursor_row = 0usize;
+        let mut cursor_col = 0usize;
+        for (i, ch) in self.input.chars().enumerate() {
+            if i == self.cursor {
+                cursor_row = row;
+                cursor_col = col;
             }
-            start += 1;
-        }
-
-        // Trim the tail so the visible text fits the box.
-        let mut end = chars.len();
-        let mut used = 0usize;
-        for (i, w) in widths.iter().enumerate().skip(start) {
-            used += w;
-            if used > width {
-                end = i;
-                break;
+            if ch == '\n' {
+                row += 1;
+                col = 0;
+            } else {
+                let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
+                if col + cw > width {
+                    row += 1;
+                    col = 0;
+                }
+                col += cw;
             }
+            rows = rows.max(row + 1);
         }
-
-        let visible: String = chars[start..end].iter().collect();
-        let column: usize = widths[start..self.cursor.min(end)].iter().sum();
-        (visible, column.min(width.saturating_sub(1)) as u16)
+        if self.cursor >= total {
+            cursor_row = row;
+            cursor_col = col;
+        }
+        (rows, cursor_row, cursor_col)
     }
 
     fn render_status(&self, frame: &mut ratatui::Frame, area: Rect) {
@@ -625,6 +670,84 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
     middle
 }
 
+/// Very small Markdown renderer: fenced code blocks, `#` headings, `**bold**`
+/// and inline `code`. Keeps the transcript readable without pulling in a full
+/// Markdown parser dependency.
+fn markdown_lines(text: &str) -> Vec<Line<'static>> {
+    let mut out = Vec::new();
+    let mut in_code = false;
+    for raw in text.split('\n') {
+        if raw.trim_start().starts_with("```") {
+            in_code = !in_code;
+            out.push(Line::styled(
+                raw.to_string(),
+                Style::default().fg(Color::DarkGray),
+            ));
+            continue;
+        }
+        if in_code {
+            out.push(Line::styled(
+                raw.to_string(),
+                Style::default().fg(Color::Green),
+            ));
+            continue;
+        }
+        if raw.trim_start().starts_with('#') {
+            out.push(Line::styled(
+                raw.to_string(),
+                Style::default().add_modifier(Modifier::BOLD),
+            ));
+            continue;
+        }
+        out.push(inline_markdown(raw));
+    }
+    out
+}
+
+fn inline_markdown(s: &str) -> Line<'static> {
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut rest = s;
+    while !rest.is_empty() {
+        let bold = find_pair(rest, "**");
+        let code = find_pair(rest, "`");
+        let pick = match (bold, code) {
+            (Some(b), Some(c)) => Some(if b.0 <= c.0 { b } else { c }),
+            (Some(b), None) => Some(b),
+            (None, Some(c)) => Some(c),
+            (None, None) => None,
+        };
+        let Some((start, inner_start, inner_len, marker_len)) = pick else {
+            spans.push(Span::raw(rest.to_string()));
+            break;
+        };
+        if start > 0 {
+            spans.push(Span::raw(rest[..start].to_string()));
+        }
+        let style = if marker_len == 2 {
+            Style::default().add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Yellow)
+        };
+        spans.push(Span::styled(
+            rest[inner_start..inner_start + inner_len].to_string(),
+            style,
+        ));
+        rest = &rest[inner_start + inner_len + marker_len..];
+    }
+    if spans.is_empty() {
+        spans.push(Span::raw(String::new()));
+    }
+    Line::from(spans)
+}
+
+/// Find `open` ... `close`; returns `(start, inner_start, inner_len, marker_len)`.
+fn find_pair(s: &str, marker: &str) -> Option<(usize, usize, usize, usize)> {
+    let start = s.find(marker)?;
+    let inner_start = start + marker.len();
+    let inner_len = s[inner_start..].find(marker)?;
+    Some((start, inner_start, inner_len, marker.len()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -639,6 +762,7 @@ mod tests {
             system_prompt: String::new(),
             lines: Vec::new(),
             streaming: String::new(),
+            thinking: String::new(),
             input: String::new(),
             cursor: 0,
             follow: true,
@@ -750,22 +874,47 @@ mod tests {
         for c in "中文".chars() {
             state.on_key(key(KeyCode::Char(c)), &tx);
         }
-        let (visible, column) = state.input_view(20);
-        assert_eq!(visible, "中文");
+        let (rows, cursor_row, cursor_col) = state.input_layout(20);
+        assert_eq!(rows, 1);
+        assert_eq!(cursor_row, 0);
         // Two wide glyphs → the cursor sits at display column 4, not 2.
-        assert_eq!(column, 4);
+        assert_eq!(cursor_col, 4);
     }
 
     #[test]
-    fn input_view_scrolls_for_long_wide_text() {
+    fn wide_text_wraps_to_next_row() {
         let mut state = test_state();
         for c in "一二三四五六".chars() {
             state.input.push(c);
             state.cursor += 1;
         }
-        // 12 display columns in a 6-column box: only the tail stays visible.
-        let (visible, column) = state.input_view(6);
-        assert_eq!(visible, "五六");
-        assert_eq!(column, 4);
+        // 12 display columns in a 6-column box → wraps to two rows.
+        let (rows, cursor_row, cursor_col) = state.input_layout(6);
+        assert_eq!(rows, 2);
+        assert_eq!(cursor_row, 1);
+        assert_eq!(cursor_col, 6);
+    }
+
+    #[test]
+    fn shift_enter_inserts_newline() {
+        let mut state = test_state();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        state.on_key(key(KeyCode::Char('a')), &tx);
+        state.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT), &tx);
+        state.on_key(key(KeyCode::Char('b')), &tx);
+        assert_eq!(state.input, "a\nb");
+        let (rows, cursor_row, _) = state.input_layout(20);
+        assert_eq!(rows, 2);
+        assert_eq!(cursor_row, 1);
+    }
+
+    #[test]
+    fn markdown_styles_bold_and_code() {
+        let line = inline_markdown("a **b** `c`");
+        assert_eq!(line.spans.len(), 4);
+        assert_eq!(line.spans[1].content.as_ref(), "b");
+        assert!(line.spans[1].style.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(line.spans[3].content.as_ref(), "c");
+        assert_eq!(line.spans[3].style.fg, Some(Color::Yellow));
     }
 }

@@ -19,7 +19,9 @@ use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
 
-use crate::config::{parse_thinking_level, resolve_model, AppConfig};
+use crate::config::{
+    list_models, parse_thinking_level, resolve_model, resolve_provider, AppConfig,
+};
 use crate::permission::{CliPermission, Mode};
 
 #[derive(Parser, Debug)]
@@ -56,6 +58,43 @@ struct Cli {
     /// Disable the full-screen TUI and use the line REPL.
     #[arg(long)]
     no_tui: bool,
+
+    /// Extended-thinking budget: off, minimal, low, medium, high, xhigh, or max.
+    #[arg(long)]
+    thinking: Option<String>,
+
+    /// Continue the most recent saved session.
+    #[arg(short = 'c', long = "continue")]
+    continue_latest: bool,
+
+    /// Force a provider (built-in or from the upstream ~/.pi/agent config).
+    #[arg(long)]
+    provider: Option<String>,
+
+    /// Override the API key for the selected provider.
+    #[arg(long)]
+    api_key: Option<String>,
+
+    /// Replace the default system prompt.
+    #[arg(long)]
+    system_prompt: Option<String>,
+
+    /// Append text to the system prompt (repeatable).
+    #[arg(long = "append-system-prompt")]
+    append_system_prompt: Vec<String>,
+
+    /// Disable AGENTS.md / CLAUDE.md context-file discovery.
+    #[arg(long = "no-context-files")]
+    no_context_files: bool,
+
+    /// List available models (optional case-insensitive search) and exit.
+    #[arg(
+        long = "list-models",
+        value_name = "SEARCH",
+        num_args = 0..=1,
+        default_missing_value = ""
+    )]
+    list_models: Option<String>,
 
     #[command(subcommand)]
     cmd: Option<Cmd>,
@@ -100,7 +139,20 @@ async fn main() -> anyhow::Result<()> {
         // Keep `PI_MODEL` coherent for anything that reads it later.
         std::env::set_var("PI_MODEL", m);
     }
-    let resolved = resolve_model(explicit_model.as_deref(), agent_home.as_ref());
+    let mut resolved = match cli.provider.as_deref() {
+        Some(provider) => {
+            match resolve_provider(provider, explicit_model.as_deref(), agent_home.as_ref()) {
+                Some(resolved) => resolved,
+                None => anyhow::bail!(
+                    "cannot resolve provider `{provider}`; pass -m <model> or run --list-models"
+                ),
+            }
+        }
+        None => resolve_model(explicit_model.as_deref(), agent_home.as_ref()),
+    };
+    if let Some(key) = cli.api_key.clone() {
+        resolved.api_key = Some(key);
+    }
     tracing::debug!(
         provider = %resolved.model.provider,
         model = %resolved.model.id,
@@ -110,20 +162,32 @@ async fn main() -> anyhow::Result<()> {
         "resolved model"
     );
 
+    if let Some(search) = cli.list_models.as_deref() {
+        for entry in list_models(search, agent_home.as_ref()) {
+            println!("{entry}");
+        }
+        return Ok(());
+    }
+
     // CLI flags / env win; the files fill holes.
     let max_turns = cli.max_turns.or(file_cfg.max_turns).unwrap_or(32);
-    let env_thinking = std::env::var("PI_REASONING_LEVEL").ok();
-    let thinking_level = file_cfg
-        .thinking_level
-        .as_deref()
-        .or(env_thinking.as_deref())
-        .or_else(|| {
-            agent_home
-                .as_ref()
-                .and_then(|h| h.settings.default_thinking_level.as_deref())
-        })
-        .and_then(parse_thinking_level)
-        .unwrap_or_default();
+    let thinking_level = if let Some(level) = cli.thinking.as_deref() {
+        parse_thinking_level(level)
+            .ok_or_else(|| anyhow::anyhow!("invalid --thinking value `{level}`"))?
+    } else {
+        let env_thinking = std::env::var("PI_REASONING_LEVEL").ok();
+        file_cfg
+            .thinking_level
+            .as_deref()
+            .or(env_thinking.as_deref())
+            .or_else(|| {
+                agent_home
+                    .as_ref()
+                    .and_then(|h| h.settings.default_thinking_level.as_deref())
+            })
+            .and_then(parse_thinking_level)
+            .unwrap_or_default()
+    };
     let yolo = cli.yolo || file_cfg.yolo;
     let json = cli.json || file_cfg.json;
 
@@ -132,6 +196,9 @@ async fn main() -> anyhow::Result<()> {
         api_key: resolved.api_key,
         max_turns,
         thinking_level,
+        system_prompt: cli.system_prompt.clone(),
+        system_prompt_append: cli.append_system_prompt.clone(),
+        no_context_files: cli.no_context_files,
         ..AppConfig::default()
     };
 
@@ -153,6 +220,17 @@ async fn main() -> anyhow::Result<()> {
                     Ok(s) => Some(s),
                     Err(e) => {
                         eprintln!("warning: failed to load session {id}: {e}");
+                        None
+                    }
+                },
+                None if cli.continue_latest => match session::latest(&app.config_dir) {
+                    Ok(Some(s)) => Some(s),
+                    Ok(None) => {
+                        eprintln!("no saved sessions to continue");
+                        None
+                    }
+                    Err(e) => {
+                        eprintln!("warning: failed to load the latest session: {e}");
                         None
                     }
                 },
