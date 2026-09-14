@@ -19,7 +19,7 @@ pi [OPTIONS] [COMMAND]
 
 | Flag | Description |
 |------|-------------|
-| `--resume <ID|PATH>` | Load a session by id, or a `.json` / `.jsonl` file. |
+| `-r, --resume [<ID|PATH>]` | Resume a session; bare `-r` uses the most recent. Accepts a `.json` / `.jsonl` file. |
 | `--session <ID|PATH>` | Same as `--resume`, explicit about file paths. |
 | `-c, --continue` | Continue the most recently updated session. |
 

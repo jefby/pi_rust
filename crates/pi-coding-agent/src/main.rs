@@ -48,9 +48,15 @@ struct Cli {
     #[arg(long)]
     json: bool,
 
-    /// Resume a saved session by id, or load a session file (native JSON or
-    /// upstream `.jsonl`).
-    #[arg(long)]
+    /// Resume a session: `-r <id|path>` for a specific one, or bare `-r` for
+    /// the most recent. Accepts a native JSON or upstream `.jsonl` file.
+    #[arg(
+        short = 'r',
+        long,
+        value_name = "ID|PATH",
+        num_args = 0..=1,
+        default_missing_value = ""
+    )]
     resume: Option<String>,
 
     /// Load a session by id or by path (native JSON or upstream `.jsonl`).
@@ -228,7 +234,15 @@ async fn main() -> anyhow::Result<()> {
         Arc::new(CliPermission::new(Mode::Interactive))
     };
 
-    match (cli.prompt, cli.resume.or(cli.session)) {
+    // `-r` / `--resume` may carry a target or be bare (=> most recent).
+    let resume_target = cli
+        .resume
+        .clone()
+        .filter(|s| !s.is_empty())
+        .or_else(|| cli.session.clone());
+    let bare_resume = matches!(cli.resume.as_deref(), Some(""));
+
+    match (cli.prompt, resume_target) {
         (Some(p), _) => print_mode::run_print(&app, p, permission, json).await,
         (None, resume_id) => {
             let initial = match resume_id {
@@ -239,17 +253,19 @@ async fn main() -> anyhow::Result<()> {
                         None
                     }
                 },
-                None if cli.continue_latest => match session::latest(&app.config_dir) {
-                    Ok(Some(s)) => Some(s),
-                    Ok(None) => {
-                        eprintln!("no saved sessions to continue");
-                        None
+                None if cli.continue_latest || bare_resume => {
+                    match session::latest(&app.config_dir) {
+                        Ok(Some(s)) => Some(s),
+                        Ok(None) => {
+                            eprintln!("no saved sessions to continue");
+                            None
+                        }
+                        Err(e) => {
+                            eprintln!("warning: failed to load the latest session: {e}");
+                            None
+                        }
                     }
-                    Err(e) => {
-                        eprintln!("warning: failed to load the latest session: {e}");
-                        None
-                    }
-                },
+                }
                 None => None,
             };
 

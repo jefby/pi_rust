@@ -15,12 +15,15 @@ pi sessions delete <id>    # delete a saved session
 
 ## Resume
 
-To continue a previous conversation, pass `--resume <id>` (or the equivalent
-`--session <id>`):
+To continue a previous conversation, pass `-r` / `--resume` with an id or a
+file path (or the equivalent `--session`):
 
 ```bash
-pi --resume 0193abcd-...
-pi --continue                 # most recently updated session
+pi -r 0193abcd-...                    # by id
+pi -r ~/.pi/agent/sessions/...jsonl  # upstream file
+pi -r                                # most recent (same as -c)
+pi --continue                        # most recently updated session
+pi --session 0193abcd-...            # explicit-by-path alias
 ```
 
 Inside the REPL you can also use `/resume <id>` to swap to a saved
