@@ -27,6 +27,8 @@
 - [x] Streaming render in the REPL.
 - [x] **Session persistence** under `$XDG_CONFIG_HOME/pi/sessions/<id>.json`;
       `pi --resume <id>` and `pi sessions list / show / delete`.
+- [x] **Upstream session interop**: import/export the TypeScript `pi` JSONL
+      format (`pi sessions import/export`), and `--resume <path.jsonl>`.
 - [x] **`AGENTS.md` / project-prompt loading**.
 - [x] Slash commands: `/clear` (as `/reset`), `/cost`, `/tools`, `/sessions`,
       `/resume`, `/session`, `/help`, `/model`, `/quit`, `/exit`.

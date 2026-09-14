@@ -19,7 +19,8 @@ pi [OPTIONS] [COMMAND]
 
 | Flag | Description |
 |------|-------------|
-| `--resume <ID>` | Load a saved session by id. |
+| `--resume <ID|PATH>` | Load a session by id, or a `.json` / `.jsonl` file. |
+| `--session <ID|PATH>` | Same as `--resume`, explicit about file paths. |
 | `-c, --continue` | Continue the most recently updated session. |
 
 ## Prompt
@@ -46,6 +47,8 @@ pi [OPTIONS] [COMMAND]
 pi sessions list
 pi sessions show <id>
 pi sessions delete <id>
+pi sessions import <path>            # upstream .jsonl
+pi sessions export <id> --to <path>  # upstream v3 JSONL
 ```
 
 ## Model resolution

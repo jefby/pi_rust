@@ -15,6 +15,7 @@ mod tui;
 
 #[cfg(feature = "tui")]
 use std::io::IsTerminal;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
@@ -47,9 +48,15 @@ struct Cli {
     #[arg(long)]
     json: bool,
 
-    /// Resume a saved session by id.
+    /// Resume a saved session by id, or load a session file (native JSON or
+    /// upstream `.jsonl`).
     #[arg(long)]
     resume: Option<String>,
+
+    /// Load a session by id or by path (native JSON or upstream `.jsonl`).
+    /// Alias of `--resume` that is explicit about file paths.
+    #[arg(long)]
+    session: Option<String>,
 
     /// Use the full-screen TUI (requires a build with `--features tui`).
     #[arg(long)]
@@ -117,6 +124,15 @@ enum SessionAction {
     Show { id: String },
     /// Delete a session by id.
     Delete { id: String },
+    /// Import an upstream (`@earendil-works/pi`) `.jsonl` session.
+    Import { path: String },
+    /// Export a local session as upstream v3 JSONL.
+    Export {
+        id: String,
+        /// Destination file (defaults to `./<id>.jsonl`).
+        #[arg(long)]
+        to: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -212,14 +228,14 @@ async fn main() -> anyhow::Result<()> {
         Arc::new(CliPermission::new(Mode::Interactive))
     };
 
-    match (cli.prompt, cli.resume) {
+    match (cli.prompt, cli.resume.or(cli.session)) {
         (Some(p), _) => print_mode::run_print(&app, p, permission, json).await,
         (None, resume_id) => {
             let initial = match resume_id {
-                Some(id) => match session::load(&app.config_dir, &id) {
+                Some(target) => match load_session_target(&app.config_dir, &target) {
                     Ok(s) => Some(s),
                     Err(e) => {
-                        eprintln!("warning: failed to load session {id}: {e}");
+                        eprintln!("warning: failed to load session {target}: {e}");
                         None
                     }
                 },
@@ -290,5 +306,41 @@ fn run_sessions_cmd(app: &AppConfig, action: SessionAction) -> anyhow::Result<()
             eprintln!("deleted {}", path.display());
             Ok(())
         }
+        SessionAction::Import { path } => {
+            let imported = session::import(Path::new(&path))?;
+            let saved = session::save(&app.config_dir, &imported)?;
+            eprintln!(
+                "imported {} message(s) from {path}",
+                imported.messages.len()
+            );
+            eprintln!("saved as {}", saved.display());
+            println!("{}", imported.id);
+            Ok(())
+        }
+        SessionAction::Export { id, to } => {
+            let s = session::load(&app.config_dir, &id)?;
+            let jsonl = session::export_jsonl(&s)?;
+            let path = to
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from(format!("{id}.jsonl")));
+            std::fs::write(&path, jsonl)?;
+            eprintln!(
+                "exported {} message(s) to {}",
+                s.messages.len(),
+                path.display()
+            );
+            Ok(())
+        }
+    }
+}
+
+/// Load a session by id (local store) or by file path (native JSON or an
+/// upstream `.jsonl`).
+fn load_session_target(config_dir: &Path, target: &str) -> anyhow::Result<session::Session> {
+    let path = Path::new(target);
+    if path.is_file() {
+        session::import(path)
+    } else {
+        session::load(config_dir, target)
     }
 }

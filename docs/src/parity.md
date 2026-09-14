@@ -65,7 +65,7 @@ Kimi, ...) works. It does **not** add provider-specific behavior.
 | Provider/model selection | `--provider`, `--model <pattern>` (glob/`provider/id`), `--models`, `--list-models` | `-m` / `PI_MODEL` (alias or upstream default) |
 | Tools control | `--tools`, `--exclude-tools`, `--no-tools`, `--no-builtin-tools` | ❌ |
 | System prompt | `--system-prompt`, `--append-system-prompt` | ✅ |
-| Sessions | `--continue`, `--resume`, `--session`, `--session-id`, `--fork`, `--session-dir`, `--no-session`, `--name` | 🟡 `--resume <id>`, `--continue` |
+| Sessions | `--continue`, `--resume`, `--session`, `--session-id`, `--fork`, `--session-dir`, `--no-session`, `--name` | 🟡 `--resume`, `--session`, `--continue`; upstream `.jsonl` import/export |
 | Resources | `--extension`, `--skill`, `--prompt-template`, `--theme`, `--no-*` | ❌ |
 | Other | `--export` (HTML), `--offline`, `--verbose`, `--approve`, `--tui-mode` | ❌ |
 
