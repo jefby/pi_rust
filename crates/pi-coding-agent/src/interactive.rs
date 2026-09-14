@@ -4,15 +4,15 @@
 use std::io::{BufRead, Write};
 use std::sync::Arc;
 
-use futures::StreamExt;
 use pi_agent::{
     run_agent_with_history, tools::default_tools, AgentConfig, AgentEvent, PermissionPolicy,
 };
-use pi_ai::{AssistantMessageEvent, Context, Message, StreamOptions};
+use pi_ai::Message;
 use tokio::sync::mpsc;
 
 use crate::config::AppConfig;
 use crate::session::Session;
+use crate::slash;
 use crate::system_prompt::build_system_prompt;
 
 pub async fn run_interactive(
@@ -50,13 +50,18 @@ pub async fn run_interactive(
             continue;
         }
         if prompt.starts_with('/') {
-            if prompt == "/compact" || prompt.starts_with("/compact ") {
-                if let Err(e) = handle_compact(app, &mut session).await {
-                    eprintln!("compact failed: {e}");
+            if is_compact(&prompt) {
+                match slash::compact(app, &mut session).await {
+                    Ok(msg) => eprintln!("{msg}"),
+                    Err(e) => eprintln!("compact failed: {e}"),
                 }
                 continue;
             }
-            if !handle_slash(&prompt, app, &mut session)? {
+            let outcome = slash::handle(&prompt, app, &mut session)?;
+            for l in &outcome.output {
+                eprintln!("{l}");
+            }
+            if !outcome.keep_going {
                 break;
             }
             continue;
@@ -119,137 +124,6 @@ pub async fn run_interactive(
     Ok(())
 }
 
-/// Returns `false` if the loop should exit (e.g. `/quit`).
-fn handle_slash(line: &str, app: &AppConfig, session: &mut Session) -> anyhow::Result<bool> {
-    let (cmd, rest) = match line.split_once(' ') {
-        Some((c, r)) => (c, r.trim()),
-        None => (line, ""),
-    };
-    match cmd {
-        "/quit" | "/exit" => return Ok(false),
-        "/help" => {
-            eprintln!("/quit /exit          quit pi");
-            eprintln!("/help                show this help");
-            eprintln!(
-                "/reset               clear in-memory transcript (does not delete session file)"
-            );
-            eprintln!("/model               print current model");
-            eprintln!("/tools               list builtin tools");
-            eprintln!("/cost                print accumulated cost/usage so far");
-            eprintln!("/sessions            list saved sessions");
-            eprintln!("/resume <id>         load a saved session by id");
-            eprintln!("/session             print current session id");
-            eprintln!("/compact             summarize older messages into a recap");
-        }
-        "/reset" => {
-            *session = Session::new(&app.model);
-            eprintln!("(reset; new session id {})", session.id);
-        }
-        "/model" => {
-            eprintln!("model: {} ({})", app.model.name, app.model.provider);
-        }
-        "/tools" => {
-            for t in default_tools() {
-                eprintln!("- {}: {}", t.name(), t.description());
-            }
-        }
-        "/cost" => {
-            let mut total_in = 0u64;
-            let mut total_out = 0u64;
-            let mut total_cost = 0.0f64;
-            for m in &session.messages {
-                if let Message::Assistant(a) = m {
-                    total_in += a.usage.input;
-                    total_out += a.usage.output;
-                    total_cost += a.usage.cost.total;
-                }
-            }
-            eprintln!("tokens: in={total_in} out={total_out}  cost: ${total_cost:.4}");
-        }
-        "/sessions" => {
-            let summaries = crate::session::list(&app.config_dir)?;
-            if summaries.is_empty() {
-                eprintln!("(no saved sessions)");
-            }
-            for s in summaries.iter().take(20) {
-                let first = truncate(&s.first_message, 60);
-                eprintln!("{}  ({} msgs, {})  {}", s.id, s.turns, s.model, first);
-            }
-        }
-        "/session" => {
-            eprintln!("{}", session.id);
-        }
-        "/resume" => {
-            if rest.is_empty() {
-                eprintln!("usage: /resume <id>");
-            } else {
-                match crate::session::load(&app.config_dir, rest) {
-                    Ok(s) => {
-                        eprintln!("loaded session {} ({} messages)", s.id, s.messages.len());
-                        *session = s;
-                    }
-                    Err(e) => eprintln!("load failed: {e}"),
-                }
-            }
-        }
-        other => {
-            eprintln!("unknown command: {other} — try /help");
-        }
-    }
-    Ok(true)
-}
-
-/// Summarize all but the last 4 messages into a single synthetic user
-/// message, replacing the older slice in-place. Prints `(nothing to compact)`
-/// if fewer than 4 messages exist.
-async fn handle_compact(app: &AppConfig, session: &mut Session) -> anyhow::Result<()> {
-    let total = session.messages.len();
-    if total < 4 {
-        eprintln!("(nothing to compact)");
-        return Ok(());
-    }
-    let keep_from = total - 4;
-    let older: Vec<Message> = session.messages[..keep_from].to_vec();
-    let older_count = older.len();
-
-    let ctx = Context {
-        system_prompt: Some(
-            "Summarize this conversation into a compact context-preserving recap. \
-             Include files mentioned, decisions, and open todos."
-                .into(),
-        ),
-        messages: older,
-        tools: Vec::new(),
-    };
-
-    let options = StreamOptions {
-        api_key: app.api_key.clone(),
-        ..Default::default()
-    };
-    let mut stream = pi_ai::stream_simple(&app.model, &ctx, &options).await?;
-    let mut summary = String::new();
-    while let Some(event) = stream.next().await {
-        if let AssistantMessageEvent::TextDelta { delta, .. } = event? {
-            summary.push_str(&delta);
-        }
-    }
-
-    let recap = Message::user_text(format!("[compacted summary]\n{summary}"));
-    let mut new_messages = Vec::with_capacity(5);
-    new_messages.push(recap);
-    new_messages.extend(session.messages.drain(keep_from..));
-    session.replace_messages(new_messages);
-    crate::session::save(&app.config_dir, session)?;
-    eprintln!("compacted {older_count} messages");
-    Ok(())
-}
-
-fn truncate(s: &str, n: usize) -> String {
-    let s = s.replace('\n', " ");
-    if s.chars().count() <= n {
-        s
-    } else {
-        let head: String = s.chars().take(n).collect();
-        format!("{head}…")
-    }
+fn is_compact(prompt: &str) -> bool {
+    prompt == "/compact" || prompt.starts_with("/compact ")
 }

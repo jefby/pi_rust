@@ -8,6 +8,7 @@
 - [CLI](./cli/print-mode.md)
   - [Print mode](./cli/print-mode.md)
   - [Interactive](./cli/interactive.md)
+  - [TUI](./cli/tui.md)
   - [Sessions](./cli/sessions.md)
   - [Permissions](./cli/permissions.md)
 - [SDK](./sdk/pi-ai.md)

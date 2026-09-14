@@ -73,8 +73,8 @@ Kimi, ...) works. It does **not** add provider-specific behavior.
 
 | Capability | Upstream | Rust |
 |------------|:--------:|:----:|
-| Interactive shell | ✅ full TUI | 🟡 line-based REPL |
-| Fullscreen mode | ✅ | ❌ |
+| Interactive shell | ✅ full TUI | 🟡 line REPL, plus an opt-in basic TUI (`tui` feature) |
+| Fullscreen mode | ✅ | 🟡 with `tui` feature |
 | Keybindings / themes | ✅ | ❌ |
 | Model cycling (`Ctrl+P`) | ✅ | ❌ |
 | Image input | ✅ | ❌ |
@@ -118,12 +118,14 @@ Kimi, ...) works. It does **not** add provider-specific behavior.
 - `web_fetch` and `todo` built-in tools.
 - `glob` tool (upstream calls it `find`).
 - Windows shell auto-detection (Git Bash → PowerShell → `cmd.exe`).
+- Optional full-screen TUI built on `ratatui` + `crossterm` (`--features tui`).
 - `--yolo` / `--json` print mode conveniences.
 
 ## Out of scope (no plans)
 
-- `@earendil-works/pi-tui` — the terminal renderer would be rebuilt on
-  `ratatui` rather than ported.
+- Porting `@earendil-works/pi-tui` verbatim. The opt-in Rust TUI covers a
+  basic chat experience; themes, image input, custom keybindings, and the
+  session tree are still missing (`ratatui` would be the base).
 - `@earendil-works/pi-web-ui` — browser components.
 - Full sandbox parity with the upstream sandbox runtime.
 

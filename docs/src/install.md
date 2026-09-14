@@ -80,3 +80,18 @@ built-in table (`anthropic`, `openai`, `google`, `deepseek`, `openrouter`,
 with no flags picks up e.g. `deepseek/deepseek-v4-flash` and the matching key
 from `auth.json` with no extra setup. Set `RUST_LOG=debug` to print the
 resolved provider, model, base URL, and whether a key was found.
+
+## Full-screen TUI
+
+An optional full-screen TUI (conversation pane, streaming output, permission
+modal) is available behind the `tui` cargo feature:
+
+```bash
+cargo install pi-coding-agent --features tui
+# or
+cargo build --release -p pi-coding-agent --features tui
+```
+
+On an interactive terminal `pi` starts the TUI automatically; `--no-tui`
+forces the line REPL. The feature is off by default and adds roughly 0.9 MiB
+to the stripped release binary. See [TUI](./cli/tui.md) for keys and details.

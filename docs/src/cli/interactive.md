@@ -9,6 +9,10 @@ persisted to disk (see [Sessions](./sessions.md)).
 pi
 ```
 
+> When `pi` is built with `--features tui` and run on an interactive terminal,
+> it starts the full-screen [TUI](./tui.md) instead of the line REPL. Pass
+> `--no-tui` to force the REPL.
+
 ## Slash commands
 
 ```text
@@ -21,6 +25,7 @@ pi
 /sessions            list saved sessions
 /resume <id>         load a saved session by id
 /session             print current session id
+/compact             summarize older messages into a recap
 ```
 
 The REPL also loads `AGENTS.md`, `CLAUDE.md`, and `.pi/instructions.md`

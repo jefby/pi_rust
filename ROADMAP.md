@@ -32,6 +32,8 @@
       scripting. (delivered in 1.1.0)
 - [x] **Config file** at `$XDG_CONFIG_HOME/pi/config.toml` (delivered in 1.2.0).
 - [x] `/compact` (auto-summarize context to free room) — delivered in 1.2.0.
+- [x] **Optional full-screen TUI** built on `ratatui`/`crossterm`
+      (`--features tui`) — basic chat, streaming, permission modal.
 
 ## Milestone 3 — Tool ecosystem ✅ (mostly delivered in 1.0.0)
 
@@ -69,8 +71,9 @@
 
 ## Beyond 1.0 — out of scope (no plans)
 
-- Porting `@earendil-works/pi-tui` — terminal renderer. Rust users
-  get more leverage from `ratatui` if/when a TUI is built.
+- Full parity with `@earendil-works/pi-tui` (themes, image input, custom
+  keybindings, session tree). The opt-in Rust TUI on `ratatui` covers the
+  basic chat experience; the rest is not planned.
 - Porting `@earendil-works/pi-web-ui` — browser components.
 - Full sandbox parity with `@anthropic-ai/sandbox-runtime`. The pi 1.0
   approach is per-tool permission prompts plus `--yolo` to bypass.

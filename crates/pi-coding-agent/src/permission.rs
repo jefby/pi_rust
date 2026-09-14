@@ -95,3 +95,57 @@ async fn prompt(
     }
     decision
 }
+
+/// Permission plumbing for the full-screen TUI. The policy forwards each
+/// request to the UI event loop and awaits the answer, instead of reading
+/// stdin (which the TUI owns).
+#[cfg(feature = "tui")]
+pub mod tui {
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use pi_agent::{PermissionDecision, PermissionPolicy};
+    use serde_json::Value;
+    use tokio::sync::{mpsc, oneshot};
+
+    /// A permission request routed to the TUI.
+    pub struct PermissionRequest {
+        pub tool_name: String,
+        pub args: Value,
+        pub respond: oneshot::Sender<PermissionDecision>,
+    }
+
+    /// [`PermissionPolicy`] that asks the TUI instead of stdin.
+    pub struct TuiPermission {
+        tx: mpsc::UnboundedSender<PermissionRequest>,
+    }
+
+    impl TuiPermission {
+        /// Returns the shared policy plus the receiver the TUI must drain.
+        #[allow(clippy::new_ret_no_self)]
+        pub fn new() -> (Arc<Self>, mpsc::UnboundedReceiver<PermissionRequest>) {
+            let (tx, rx) = mpsc::unbounded_channel();
+            (Arc::new(Self { tx }), rx)
+        }
+    }
+
+    #[async_trait]
+    impl PermissionPolicy for TuiPermission {
+        async fn check(&self, tool_name: &str, args: &Value) -> PermissionDecision {
+            let (respond, rx) = oneshot::channel();
+            let request = PermissionRequest {
+                tool_name: tool_name.to_string(),
+                args: args.clone(),
+                respond,
+            };
+            if self.tx.send(request).is_err() {
+                return PermissionDecision::Deny {
+                    reason: "UI is not available".into(),
+                };
+            }
+            rx.await.unwrap_or(PermissionDecision::Deny {
+                reason: "UI closed".into(),
+            })
+        }
+    }
+}

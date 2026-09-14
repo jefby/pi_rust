@@ -1,0 +1,44 @@
+# TUI
+
+A full-screen terminal UI is available behind the optional `tui` cargo
+feature. It replaces the line REPL with a scrollable conversation pane, an
+input box, inline tool status, and a permission modal.
+
+```bash
+cargo build --release -p pi-coding-agent --features tui
+./target/release/pi
+```
+
+The feature is **off by default** so the default binary stays small. The
+official [prebuilt Windows binary](../../../prebuilt/win_x64/) is built with
+it enabled.
+
+## Behavior
+
+- When the `tui` feature is compiled in and both stdin and stdout are a TTY,
+  `pi` starts the TUI automatically.
+- `--no-tui` forces the line REPL.
+- `--tui` only *requires* a TTY; on a pipe it warns and falls back to the REPL.
+- `-p` / `--json` print mode is unaffected.
+
+## Keys
+
+| Key | Action |
+|-----|--------|
+| `Enter` | send the message |
+| `PageUp` / `PageDown` / `Up` / `Down` | scroll the conversation |
+| `Ctrl+C` | quit |
+| `Ctrl+D` | quit when the input is empty |
+| `y` / `a` / `n` | answer a permission prompt (allow / allow session / deny) |
+
+## Slash commands
+
+The same commands as the [REPL](./interactive.md#slash-commands) are
+supported, including `/compact`.
+
+## Size
+
+Enabling the feature links [`ratatui`](https://crates.io/crates/ratatui) and
+[`crossterm`](https://crates.io/crates/crossterm). On
+`x86_64-pc-windows-gnu` the stripped release binary grows from ~10.8 MiB to
+~11.7 MiB (roughly +0.9 MiB, +8%).

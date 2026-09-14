@@ -8,8 +8,13 @@ mod pi_agent_config;
 mod print_mode;
 mod project;
 mod session;
+mod slash;
 mod system_prompt;
+#[cfg(feature = "tui")]
+mod tui;
 
+#[cfg(feature = "tui")]
+use std::io::IsTerminal;
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
@@ -43,6 +48,14 @@ struct Cli {
     /// Resume a saved session by id.
     #[arg(long)]
     resume: Option<String>,
+
+    /// Use the full-screen TUI (requires a build with `--features tui`).
+    #[arg(long)]
+    tui: bool,
+
+    /// Disable the full-screen TUI and use the line REPL.
+    #[arg(long)]
+    no_tui: bool,
 
     #[command(subcommand)]
     cmd: Option<Cmd>,
@@ -145,6 +158,25 @@ async fn main() -> anyhow::Result<()> {
                 },
                 None => None,
             };
+
+            if cli.tui && !cfg!(feature = "tui") {
+                eprintln!("--tui: this build has no `tui` feature; using the line REPL");
+            }
+
+            #[cfg(feature = "tui")]
+            {
+                let interactive_tty =
+                    std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+                if cli.tui && !interactive_tty {
+                    eprintln!("warning: --tui needs an interactive terminal; using the line REPL");
+                }
+                let use_tui = !cli.no_tui && interactive_tty;
+                if use_tui {
+                    let (perm, rx) = crate::permission::tui::TuiPermission::new();
+                    return tui::run_tui(&app, perm, rx, initial).await;
+                }
+            }
+
             interactive::run_interactive(&app, permission, initial).await
         }
     }
