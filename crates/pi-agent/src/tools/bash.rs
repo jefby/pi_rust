@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -11,16 +12,218 @@ use tokio::time::{timeout, Duration};
 
 use crate::types::{AgentTool, AgentToolResult};
 
+/// Which shell backs the `bash` tool.
+///
+/// `Cmd`/`PowerShell` are only constructed on Windows; without the allow the
+/// `dead_code` lint fires on Unix even though both variants are matched on.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShellKind {
+    /// `bash -lc <cmd>` (Unix, and Git Bash / MSYS2 on Windows).
+    Bash,
+    /// Windows `cmd.exe /C <cmd>`.
+    Cmd,
+    /// PowerShell `-NoProfile -Command <cmd>`.
+    PowerShell,
+}
+
+/// Resolved shell used to execute commands. Detection happens once when the
+/// tool is constructed so the agent keeps a stable shell for the whole run.
+#[derive(Debug, Clone)]
+struct Shell {
+    program: OsString,
+    kind: ShellKind,
+}
+
+impl Shell {
+    /// Pick a shell for the current platform.
+    ///
+    /// On Unix this is always `bash -lc`. On Windows we prefer a real `bash`
+    /// (Git for Windows / MSYS2 / Cygwin) so the commands the model emits keep
+    /// working unchanged, then PowerShell (which shares many bash aliases such
+    /// as `pwd` and `ls`), and finally the always-present `cmd.exe`.
+    #[cfg(windows)]
+    fn detect() -> Self {
+        Self::detect_windows()
+    }
+
+    #[cfg(not(windows))]
+    fn detect() -> Self {
+        Self {
+            program: OsString::from("bash"),
+            kind: ShellKind::Bash,
+        }
+    }
+
+    #[cfg(windows)]
+    fn detect_windows() -> Self {
+        if let Some(program) = find_bash() {
+            return Self {
+                program,
+                kind: ShellKind::Bash,
+            };
+        }
+
+        for program in ["pwsh.exe", "pwsh", "powershell.exe", "powershell"] {
+            if find_in_path(program).is_some() {
+                return Self {
+                    program: OsString::from(program),
+                    kind: ShellKind::PowerShell,
+                };
+            }
+        }
+
+        // `cmd.exe` ships with every Windows install.
+        Self {
+            program: OsString::from("cmd.exe"),
+            kind: ShellKind::Cmd,
+        }
+    }
+
+    /// Build a `Command` that runs `cmd` in this shell.
+    fn command(&self, cmd: &str) -> Command {
+        let mut command = Command::new(&self.program);
+        match self.kind {
+            ShellKind::Bash => {
+                command.arg("-lc").arg(cmd);
+            }
+            ShellKind::Cmd => {
+                command.arg("/C").arg(cmd);
+            }
+            ShellKind::PowerShell => {
+                command.arg("-NoProfile").arg("-Command").arg(cmd);
+            }
+        }
+        command
+    }
+
+    /// Stable name for the resolved shell (`"bash"`, `"cmd"`, `"powershell"`).
+    fn name(&self) -> &'static str {
+        match self.kind {
+            ShellKind::Bash => "bash",
+            ShellKind::Cmd => "cmd",
+            ShellKind::PowerShell => "powershell",
+        }
+    }
+
+    /// Human-readable invocation shown to the model in the tool description.
+    fn invocation(&self) -> &'static str {
+        match self.kind {
+            ShellKind::Bash => "bash -lc <cmd>",
+            ShellKind::Cmd => "cmd /C <cmd>",
+            ShellKind::PowerShell => "powershell -NoProfile -Command <cmd>",
+        }
+    }
+}
+
+/// Locate `bash` on Windows: first on `PATH`, then in the usual Git for
+/// Windows install directories.
+#[cfg(windows)]
+fn find_bash() -> Option<OsString> {
+    if let Some(path) = find_in_path("bash") {
+        return Some(path.into_os_string());
+    }
+
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    for var in ["ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"] {
+        if let Some(base) = std::env::var_os(var) {
+            candidates.push(
+                PathBuf::from(&base)
+                    .join("Git")
+                    .join("bin")
+                    .join("bash.exe"),
+            );
+        }
+    }
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        candidates.push(
+            PathBuf::from(&local)
+                .join("Programs")
+                .join("Git")
+                .join("bin")
+                .join("bash.exe"),
+        );
+    }
+
+    candidates
+        .into_iter()
+        .find(|p| p.is_file())
+        .map(PathBuf::into_os_string)
+}
+
+/// Minimal `which` for Windows: walk `PATH`, appending `PATHEXT` suffixes.
+#[cfg(windows)]
+fn find_in_path(program: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    let pathext = std::env::var("PATHEXT").unwrap_or_else(|_| ".EXE;.CMD;.BAT;.COM".to_string());
+
+    let names: Vec<String> = if program.contains('.') {
+        vec![program.to_string()]
+    } else {
+        let mut names = vec![program.to_string()];
+        for ext in pathext.split(';').filter(|s| !s.is_empty()) {
+            names.push(format!("{program}{ext}"));
+        }
+        names
+    };
+
+    for dir in std::env::split_paths(&path) {
+        if dir.as_os_str().is_empty() {
+            continue;
+        }
+        for name in &names {
+            let full = dir.join(name);
+            if full.is_file() {
+                return Some(full);
+            }
+        }
+    }
+    None
+}
+
+/// `std::fs::canonicalize` yields a verbatim (`\\?\`) path on Windows, which
+/// prints poorly to the model and confuses some shells. Strip the prefix.
+#[cfg(windows)]
+fn normalize_path(path: PathBuf) -> PathBuf {
+    let s = path.to_string_lossy();
+    if let Some(rest) = s.strip_prefix(r"\\?\") {
+        if let Some(unc) = rest.strip_prefix(r"UNC\") {
+            return PathBuf::from(format!(r"\\{unc}"));
+        }
+        return PathBuf::from(rest);
+    }
+    path
+}
+
+#[cfg(not(windows))]
+fn normalize_path(path: PathBuf) -> PathBuf {
+    path
+}
+
 pub struct BashTool {
     cwd: Mutex<PathBuf>,
+    shell: Shell,
+    description: String,
 }
 
 impl BashTool {
     pub fn new() -> Self {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let shell = Shell::detect();
+        let description = format!(
+            "Run a shell command via `{}`. Returns combined stdout/stderr and exit code, and `cd <path>` to change persistent cwd.",
+            shell.invocation()
+        );
         Self {
-            cwd: Mutex::new(cwd),
+            cwd: Mutex::new(normalize_path(cwd)),
+            shell,
+            description,
         }
+    }
+
+    /// Name of the resolved shell (`"bash"`, `"cmd"`, or `"powershell"`).
+    pub fn shell_name(&self) -> &'static str {
+        self.shell.name()
     }
 }
 
@@ -39,7 +242,7 @@ impl AgentTool for BashTool {
         true
     }
     fn description(&self) -> &str {
-        "Run a shell command via `bash -lc <cmd>`. Returns combined stdout/stderr and exit code, and `cd <path>` to change persistent cwd."
+        &self.description
     }
     fn parameters(&self) -> Value {
         json!({
@@ -72,7 +275,7 @@ impl AgentTool for BashTool {
                 } else {
                     guard.join(&candidate)
                 };
-                let resolved = joined.canonicalize().unwrap_or(joined);
+                let resolved = normalize_path(joined.canonicalize().unwrap_or(joined));
                 *guard = resolved.clone();
                 return Ok(AgentToolResult::text(format!(
                     "(cwd → {})",
@@ -83,9 +286,9 @@ impl AgentTool for BashTool {
 
         let cwd_snapshot = { self.cwd.lock().await.clone() };
 
-        let mut child = Command::new("bash")
-            .arg("-lc")
-            .arg(cmd)
+        let mut child = self
+            .shell
+            .command(cmd)
             .current_dir(&cwd_snapshot)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

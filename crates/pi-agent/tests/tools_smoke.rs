@@ -159,22 +159,33 @@ async fn bash_runs_simple_command() {
         .await
         .unwrap();
     let text = res.content[0].as_text().unwrap();
-    assert!(text.contains("hi-from-bash"));
-    assert!(text.contains("[exit 0]"));
+    assert!(text.contains("hi-from-bash"), "got: {text}");
+    assert!(text.contains("[exit 0]"), "got: {text}");
 }
 
 #[tokio::test]
 async fn bash_persists_cwd_across_calls() {
     let tool: Arc<bash::BashTool> = Arc::new(bash::BashTool::new());
 
+    // Use the platform temp dir instead of a hard-coded `/tmp` so this works
+    // on Windows too.
+    let dir = scratch_dir();
     let res = tool
-        .execute("1", json!({"command": "cd /tmp"}))
+        .execute("1", json!({"command": format!("cd {}", dir.display())}))
         .await
         .unwrap();
     let text = res.content[0].as_text().unwrap();
     assert!(text.contains("cwd"), "got: {text}");
 
-    let res = tool.execute("2", json!({"command": "pwd"})).await.unwrap();
+    // Ask the resolved shell to print its working directory. `pwd` works in
+    // bash and PowerShell; cmd.exe prints the cwd for a bare `cd`.
+    let pwd = if tool.shell_name() == "cmd" {
+        "cd"
+    } else {
+        "pwd"
+    };
+    let res = tool.execute("2", json!({"command": pwd})).await.unwrap();
     let text = res.content[0].as_text().unwrap();
-    assert!(text.contains("/tmp"), "got: {text}");
+    let dir_name = dir.file_name().unwrap().to_string_lossy().to_string();
+    assert!(text.contains(&dir_name), "expected '{dir_name}' in: {text}");
 }

@@ -90,6 +90,14 @@ PI_MODEL=gpt-4o            pi -p "..."   # OpenAI
 PI_MODEL=gemini-2.0-flash  pi -p "..."   # Google (via GOOGLE_API_KEY)
 ```
 
+### Windows
+
+`pi` compiles and runs on Windows (MSVC or GNU toolchain). The `bash` tool
+auto-detects a shell: it prefers `bash` from Git for Windows, then PowerShell,
+then `cmd.exe`. Install [Git for Windows](https://git-scm.com/download/win) for
+Unix-compatible commands. See
+[docs/src/install.md](./docs/src/install.md#windows) for build prerequisites.
+
 ## OpenAI-compatible providers
 
 Any base URL whose API matches OpenAI Chat Completions works through the
