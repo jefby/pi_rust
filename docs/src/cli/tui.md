@@ -32,6 +32,26 @@ it enabled.
 | `Ctrl+D` | quit when the input is empty |
 | `y` / `a` / `n` | answer a permission prompt (allow / allow session / deny) |
 
+## Status bar
+
+The bottom status bar mirrors upstream `pi`:
+
+```
+~/github_code/pi_rust (feat/windows)
+↑12.3k ↓4.5k R1.2k $0.031  42.3%/200k               deepseek-v4-flash • high
+```
+
+- Line 1: the working directory (`~` for home) plus the git branch, with a
+  spinner while a turn is running.
+- Line 2: cumulative token usage (`↑` input, `↓` output, `R` cache read,
+  `W` cache write), USD cost, and context-window usage on the left;
+  `model • thinking-level` on the right.
+- A pending permission prompt temporarily replaces the left of line 2 with
+  `permission required — y / a / n`.
+
+Key hints (`Enter send`, `Shift+Enter newline`, `/help`) live in the input box
+title.
+
 ## Session tree
 
 `/tree` opens an overlay of the current session's entries (indented by depth);

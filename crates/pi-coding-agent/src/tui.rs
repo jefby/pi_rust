@@ -24,7 +24,7 @@ use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
 use ratatui::DefaultTerminal;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
-use unicode_width::UnicodeWidthChar;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::config::AppConfig;
 use crate::permission::tui::{PermissionRequest, TuiPermission};
@@ -115,6 +115,8 @@ struct State {
     pending_perm: Option<PendingPermission>,
     picker: Option<Picker>,
     tree: Option<TreeOverlay>,
+    /// Cached `git rev-parse --abbrev-ref HEAD` for the footer.
+    git_branch: Option<String>,
     /// Length of the active branch when the current turn started; new messages
     /// from the turn are appended from this index.
     branch_len: usize,
@@ -169,6 +171,7 @@ async fn run(
         pending_perm: None,
         picker: None,
         tree: None,
+        git_branch: detect_git_branch(),
         branch_len: 0,
     };
     if pick {
@@ -883,14 +886,14 @@ impl State {
             Constraint::Length(1),
             Constraint::Min(1),
             Constraint::Length(input_rows as u16 + 2),
-            Constraint::Length(1),
+            Constraint::Length(2),
         ])
         .split(area);
 
         self.render_title(frame, chunks[0]);
         self.render_chat(frame, chunks[1]);
         self.render_input(frame, chunks[2]);
-        self.render_status(frame, chunks[3]);
+        self.render_footer(frame, chunks[3]);
 
         if self.pending_perm.is_some() {
             self.render_permission(frame, area);
@@ -956,9 +959,9 @@ impl State {
 
     fn render_input(&self, frame: &mut ratatui::Frame, area: Rect) {
         let title = if self.busy {
-            " message (busy) "
+            " message (busy — Ctrl+C to interrupt) "
         } else {
-            " message (Shift+Enter newline) "
+            " message · Enter send · Shift+Enter newline · /help "
         };
         let inner_width = area.width.saturating_sub(2);
         let inner_height = area.height.saturating_sub(2) as usize;
@@ -1018,22 +1021,129 @@ impl State {
         (rows, cursor_row, cursor_col)
     }
 
-    fn render_status(&self, frame: &mut ratatui::Frame, area: Rect) {
-        let left = if self.pending_perm.is_some() {
-            "permission required — y / a / n".to_string()
-        } else if self.busy {
-            format!("{} working…", SPINNER[self.spinner % SPINNER.len()])
+    /// Bottom status bar, mirroring upstream `pi`: a dim `pwd (git-branch)`
+    /// line, then usage stats on the left and `model • thinking` on the right.
+    fn render_footer(&self, frame: &mut ratatui::Frame, area: Rect) {
+        let dim = Style::default().fg(Color::DarkGray);
+
+        let mut first = String::new();
+        if self.busy {
+            first.push_str(SPINNER[self.spinner % SPINNER.len()]);
+            first.push(' ');
+        }
+        first.push_str(&self.pwd_display());
+        let line1 = Line::styled(first, dim);
+
+        let uses_subscription = self.app.model.provider == "kimi-coding";
+        let right = if self.app.model.reasoning {
+            let level = thinking_label(self.app.thinking_level);
+            let suffix = if level == "off" {
+                "thinking off".to_string()
+            } else {
+                level.to_string()
+            };
+            format!("{} • {suffix}", self.app.model.id)
         } else {
-            "ready".to_string()
+            self.app.model.id.clone()
         };
-        let line = Line::from(vec![
-            Span::styled(left, Style::default().fg(Color::Green)),
+
+        let left = if self.pending_perm.is_some() {
             Span::styled(
-                "    Enter send • PgUp/PgDn scroll • Ctrl+C quit • /help",
-                Style::default().fg(Color::DarkGray),
-            ),
-        ]);
-        frame.render_widget(Paragraph::new(line), area);
+                "permission required — y / a / n".to_string(),
+                Style::default().fg(Color::Yellow),
+            )
+        } else {
+            Span::styled(self.stats_line(uses_subscription), dim)
+        };
+
+        let line2 = padded_line(vec![left], Span::styled(right, dim), area.width);
+        frame.render_widget(Paragraph::new(Text::from(vec![line1, line2])), area);
+    }
+
+    fn pwd_display(&self) -> String {
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let mut path = cwd.to_string_lossy().to_string();
+        if let Some(home) = dirs::home_dir() {
+            let home = home.to_string_lossy().to_string();
+            let sep = std::path::MAIN_SEPARATOR;
+            if path == home {
+                path = "~".to_string();
+            } else if let Some(rest) = path.strip_prefix(&format!("{home}{sep}")) {
+                path = format!("~{sep}{rest}");
+            }
+        }
+        match &self.git_branch {
+            Some(branch) => format!("{path} ({branch})"),
+            None => path,
+        }
+    }
+
+    /// Cumulative token usage across every assistant entry in the session.
+    fn usage_totals(&self) -> (u64, u64, u64, u64, f64) {
+        let mut input = 0;
+        let mut output = 0;
+        let mut cache_read = 0;
+        let mut cache_write = 0;
+        let mut cost = 0.0;
+        for entry in &self.session.entries {
+            if let Some(Message::Assistant(a)) = &entry.message {
+                input += a.usage.input;
+                output += a.usage.output;
+                cache_read += a.usage.cache_read;
+                cache_write += a.usage.cache_write;
+                cost += a.usage.cost.total;
+            }
+        }
+        (input, output, cache_read, cache_write, cost)
+    }
+
+    /// Tokens the latest request occupied, as a percentage of the context window.
+    fn context_percent(&self) -> Option<f64> {
+        let last = self
+            .session
+            .entries
+            .iter()
+            .rev()
+            .find_map(|e| match &e.message {
+                Some(Message::Assistant(a)) => Some(&a.usage),
+                _ => None,
+            })?;
+        let used = last.input + last.cache_read + last.cache_write + last.output;
+        let window = self.app.model.context_window as f64;
+        if used > 0 && window > 0.0 {
+            Some(used as f64 / window * 100.0)
+        } else {
+            None
+        }
+    }
+
+    fn stats_line(&self, uses_subscription: bool) -> String {
+        let (input, output, cache_read, cache_write, cost) = self.usage_totals();
+        let mut parts: Vec<String> = Vec::new();
+        if input > 0 {
+            parts.push(format!("↑{}", format_tokens(input)));
+        }
+        if output > 0 {
+            parts.push(format!("↓{}", format_tokens(output)));
+        }
+        if cache_read > 0 {
+            parts.push(format!("R{}", format_tokens(cache_read)));
+        }
+        if cache_write > 0 {
+            parts.push(format!("W{}", format_tokens(cache_write)));
+        }
+        if cost > 0.0 || uses_subscription {
+            parts.push(format!(
+                "${cost:.3}{}",
+                if uses_subscription { " (sub)" } else { "" }
+            ));
+        }
+        let window = format_tokens(self.app.model.context_window as u64);
+        parts.push(match self.context_percent() {
+            Some(p) => format!("{p:.1}%/{window}"),
+            None => format!("?/{window}"),
+        });
+        parts.join(" ")
     }
 
     fn render_permission(&self, frame: &mut ratatui::Frame, area: Rect) {
@@ -1154,6 +1264,59 @@ impl State {
             .title(title)
             .border_style(Style::default().fg(Color::Cyan));
         frame.render_widget(Paragraph::new(Text::from(lines)).block(block), popup);
+    }
+}
+
+/// A line with `left` spans flush-left and `right` flush-right, padded by
+/// display width so wide (CJK) text and the spinner stay aligned.
+fn padded_line(mut left: Vec<Span<'static>>, right: Span<'static>, width: u16) -> Line<'static> {
+    let left_w: usize = left
+        .iter()
+        .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+        .sum();
+    let right_w = UnicodeWidthStr::width(right.content.as_ref());
+    let gap = (width as usize).saturating_sub(left_w + right_w).max(1);
+    left.push(Span::raw(" ".repeat(gap)));
+    left.push(right);
+    Line::from(left)
+}
+
+/// Compact token counts, mirroring upstream `pi`.
+fn format_tokens(count: u64) -> String {
+    match count {
+        0..=999 => count.to_string(),
+        1_000..=9_999 => format!("{:.1}k", count as f64 / 1000.0),
+        10_000..=999_999 => format!("{}k", (count as f64 / 1000.0).round() as u64),
+        1_000_000..=9_999_999 => format!("{:.1}M", count as f64 / 1_000_000.0),
+        _ => format!("{}M", (count as f64 / 1_000_000.0).round() as u64),
+    }
+}
+
+fn thinking_label(level: pi_ai::ThinkingLevel) -> &'static str {
+    match level {
+        pi_ai::ThinkingLevel::Off => "off",
+        pi_ai::ThinkingLevel::Minimal => "minimal",
+        pi_ai::ThinkingLevel::Low => "low",
+        pi_ai::ThinkingLevel::Medium => "medium",
+        pi_ai::ThinkingLevel::High => "high",
+        pi_ai::ThinkingLevel::Xhigh => "xhigh",
+    }
+}
+
+/// Current git branch (cached for the footer), if in a repo with a branch.
+fn detect_git_branch() -> Option<String> {
+    let out = std::process::Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let branch = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if branch.is_empty() || branch == "HEAD" {
+        None
+    } else {
+        Some(branch)
     }
 }
 
@@ -1288,6 +1451,7 @@ mod tests {
             pending_perm: None,
             picker: None,
             tree: None,
+            git_branch: None,
             branch_len: 0,
         }
     }
@@ -1629,5 +1793,29 @@ mod tests {
         assert!(state.session.is_empty());
         // Only the re-announced model line remains.
         assert_eq!(state.lines.len(), 1);
+    }
+
+    #[test]
+    fn padded_line_aligns_right_edge() {
+        let line = padded_line(vec![Span::raw("ready")], Span::raw("hint"), 20);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, "ready           hint");
+        assert_eq!(UnicodeWidthStr::width(text.as_str()), 20);
+    }
+
+    #[test]
+    fn padded_line_counts_cjk_width() {
+        // "工作" occupies 4 display columns, so the right edge still lands on 10.
+        let line = padded_line(vec![Span::raw("工作")], Span::raw("x"), 10);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(UnicodeWidthStr::width(text.as_str()), 10);
+    }
+
+    #[test]
+    fn format_tokens_is_compact() {
+        assert_eq!(format_tokens(999), "999");
+        assert_eq!(format_tokens(1234), "1.2k");
+        assert_eq!(format_tokens(12_345), "12k");
+        assert_eq!(format_tokens(2_500_000), "2.5M");
     }
 }
