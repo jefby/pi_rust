@@ -6,7 +6,9 @@ Ready-to-run `pi` CLI for 64-bit Windows. No Rust toolchain required.
 
 | File | Size | Description |
 |------|------|-------------|
-| `pi-1.2.0-windows-x86_64.zip` | 4.9 MB | Zip archive containing `pi.exe` |
+| `pi-1.2.0-windows-x86_64.zip` | 5.0 MB | Zip archive containing `pi.exe` |
+
+This build has the optional **full-screen TUI enabled** (`--features tui`).
 
 ## Usage
 
@@ -17,6 +19,8 @@ PowerShell / cmd:
 ```powershell
 Expand-Archive .\prebuilt\win_x64\pi-1.2.0-windows-x86_64.zip -DestinationPath .\pi
 .\pi\pi.exe --help
+.\pi\pi.exe                       # starts the TUI on an interactive terminal
+.\pi\pi.exe --no-tui              # line REPL instead
 .\pi\pi.exe -p "List the files in this directory"
 ```
 
@@ -37,27 +41,41 @@ The CLI reuses the upstream `pi` config under `~/.pi/agent`
 and custom providers you already configured for the TypeScript `pi` apply
 here too. Set `RUST_LOG=debug` to print the resolved provider/model/base URL.
 
+## TUI keys
+
+| Key | Action |
+|-----|--------|
+| `Enter` | send |
+| `PageUp` / `PageDown` / `Up` / `Down` | scroll |
+| `Ctrl+C` | quit |
+| `y` / `a` / `n` | answer a permission prompt |
+
+See [`docs/src/cli/tui.md`](../../docs/src/cli/tui.md).
+
 ## Build provenance
 
 | Field | Value |
 |-------|-------|
 | Version | `pi 1.2.0` |
-| Commit | `e0de9dc` (`feat/windows`) |
+| Commit | `94fe5f3` (`feat/windows`) |
 | Built on | 2026-09-14 |
 | Target | `x86_64-pc-windows-gnu` |
+| Features | `tui` |
 | Toolchain | rustc 1.98.1 (stable) |
 | C compiler | w64devkit GCC 16.2.0 (MinGW-w64) |
 | Post-processing | `strip --strip-all`, then zip |
-| Uncompressed `pi.exe` | 11,327,488 bytes (~10.8 MiB) |
-| SHA-256 (`pi.exe`) | `1657b1d9644205c3286721f1768bd64c243c0e1f4cafeec89a67f2ff63859383` |
-| SHA-256 (`.zip`) | `d40aa92105e0bf176a7ddcbbaef9af128c22f537de41b67ef9717bb89e0779eb` |
+| Uncompressed `pi.exe` | 12,302,336 bytes (~11.7 MiB) |
+| SHA-256 (`pi.exe`) | `977c53c90411025d2fe3ca6ad41fa1887c5bd033018703bf26ba0362f210f207` |
+| SHA-256 (`.zip`) | `361b4865006be4a101820a7a62579cc73f0504b285f7786e854daf77d0d256c7` |
 
 Reproduce with:
 
 ```bash
-cargo build --release -p pi-coding-agent
+cargo build --release -p pi-coding-agent --features tui
 strip --strip-all target/release/pi.exe
 ```
+
+Without `--features tui` the stripped binary is 11,341,824 bytes (~10.8 MiB).
 
 ## Runtime requirements
 
