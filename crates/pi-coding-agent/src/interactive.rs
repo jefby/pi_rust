@@ -66,6 +66,7 @@ pub async fn run_interactive(
             .with_tools(default_tools())
             .with_max_turns(app.max_turns)
             .with_thinking(app.thinking_level)
+            .with_api_key(app.api_key.clone())
             .with_permission(permission.clone());
         let (tx, mut rx) = mpsc::unbounded_channel();
         let user = Message::user_text(prompt);
@@ -221,7 +222,11 @@ async fn handle_compact(app: &AppConfig, session: &mut Session) -> anyhow::Resul
         tools: Vec::new(),
     };
 
-    let mut stream = pi_ai::stream_simple(&app.model, &ctx, &StreamOptions::default()).await?;
+    let options = StreamOptions {
+        api_key: app.api_key.clone(),
+        ..Default::default()
+    };
+    let mut stream = pi_ai::stream_simple(&app.model, &ctx, &options).await?;
     let mut summary = String::new();
     while let Some(event) = stream.next().await {
         if let AssistantMessageEvent::TextDelta { delta, .. } = event? {

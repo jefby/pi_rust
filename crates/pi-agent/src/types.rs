@@ -121,6 +121,13 @@ impl AgentConfig {
         self.thinking_level = level;
         self
     }
+
+    /// Set the API key used for provider calls. Overrides the provider's
+    /// environment variable (e.g. `OPENAI_API_KEY`).
+    pub fn with_api_key(mut self, key: Option<String>) -> Self {
+        self.stream_options.api_key = key;
+        self
+    }
 }
 
 /// Events emitted by the agent loop, mirroring `AgentEvent` in TS.

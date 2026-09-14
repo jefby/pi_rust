@@ -27,6 +27,7 @@ pub async fn run_print(
         .with_tools(default_tools())
         .with_max_turns(app.max_turns)
         .with_thinking(app.thinking_level)
+        .with_api_key(app.api_key.clone())
         .with_permission(permission);
     let (tx, mut rx) = mpsc::unbounded_channel();
     let user = Message::user_text(prompt);

@@ -4,6 +4,7 @@ mod config;
 mod file_config;
 mod interactive;
 mod permission;
+mod pi_agent_config;
 mod print_mode;
 mod project;
 mod session;
@@ -13,7 +14,7 @@ use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
 
-use crate::config::{parse_thinking_level, AppConfig};
+use crate::config::{parse_thinking_level, resolve_model, AppConfig};
 use crate::permission::{CliPermission, Mode};
 
 #[derive(Parser, Debug)]
@@ -73,32 +74,49 @@ async fn main() -> anyhow::Result<()> {
         .with_writer(std::io::stderr)
         .init();
 
-    // Load `$XDG_CONFIG_HOME/pi/config.toml` (best-effort) before parsing
-    // argv so `PI_MODEL` can be seeded from the file before the `env`
-    // attribute on `Cli::model` resolves it.
+    // Load `$XDG_CONFIG_HOME/pi/config.toml` (best-effort).
     let file_cfg = file_config::load();
-    if let Some(m) = &file_cfg.model {
-        if std::env::var_os("PI_MODEL").is_none() {
-            std::env::set_var("PI_MODEL", m);
-        }
-    }
+    // Bridge to the upstream `~/.pi/agent` config (settings/auth/models).
+    let agent_home = pi_agent_config::AgentHome::load();
 
     let cli = Cli::parse();
-    if let Some(m) = &cli.model {
+
+    // Model precedence: `-m` / `PI_MODEL` → `config.toml` → upstream settings.json.
+    let explicit_model = cli.model.clone().or_else(|| file_cfg.model.clone());
+    if let Some(m) = &explicit_model {
+        // Keep `PI_MODEL` coherent for anything that reads it later.
         std::env::set_var("PI_MODEL", m);
     }
+    let resolved = resolve_model(explicit_model.as_deref(), agent_home.as_ref());
+    tracing::debug!(
+        provider = %resolved.model.provider,
+        model = %resolved.model.id,
+        api = %resolved.model.api,
+        base_url = %resolved.model.base_url,
+        has_api_key = resolved.api_key.is_some(),
+        "resolved model"
+    );
 
-    // CLI flags / env win; the file fills holes.
+    // CLI flags / env win; the files fill holes.
     let max_turns = cli.max_turns.or(file_cfg.max_turns).unwrap_or(32);
+    let env_thinking = std::env::var("PI_REASONING_LEVEL").ok();
     let thinking_level = file_cfg
         .thinking_level
         .as_deref()
+        .or(env_thinking.as_deref())
+        .or_else(|| {
+            agent_home
+                .as_ref()
+                .and_then(|h| h.settings.default_thinking_level.as_deref())
+        })
         .and_then(parse_thinking_level)
         .unwrap_or_default();
     let yolo = cli.yolo || file_cfg.yolo;
     let json = cli.json || file_cfg.json;
 
     let app = AppConfig {
+        model: resolved.model,
+        api_key: resolved.api_key,
         max_turns,
         thinking_level,
         ..AppConfig::default()
