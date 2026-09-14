@@ -61,8 +61,11 @@ pub async fn run_interactive(
             for l in &outcome.output {
                 eprintln!("{l}");
             }
-            if outcome.action != slash::SlashAction::None {
-                eprintln!("(/tree and /fork need the full-screen TUI; use --features tui)");
+            match outcome.action {
+                slash::SlashAction::Tree | slash::SlashAction::Fork => {
+                    eprintln!("(/tree and /fork need the full-screen TUI; use --features tui)");
+                }
+                slash::SlashAction::New | slash::SlashAction::None => {}
             }
             if !outcome.keep_going {
                 break;

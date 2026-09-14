@@ -18,6 +18,8 @@ pub enum SlashAction {
     Tree,
     /// Open the fork overlay (branch off a previous user message).
     Fork,
+    /// A new session was started; front-ends should reset their view.
+    New,
 }
 
 pub struct SlashOutcome {
@@ -67,7 +69,8 @@ pub fn handle(line: &str, app: &AppConfig, session: &mut Session) -> anyhow::Res
         "/help" => SlashOutcome::keep(vec![
             "/quit /exit          quit pi".into(),
             "/help                show this help".into(),
-            "/reset               clear in-memory transcript (does not delete session file)".into(),
+            "/new                 start a new session".into(),
+            "/reset               start a new session (alias of /new)".into(),
             "/model               print current model".into(),
             "/tools               list builtin tools".into(),
             "/cost                print accumulated cost/usage so far".into(),
@@ -79,9 +82,19 @@ pub fn handle(line: &str, app: &AppConfig, session: &mut Session) -> anyhow::Res
             "/clone               duplicate the active branch into a new session".into(),
             "/compact             summarize older messages into a recap".into(),
         ]),
+        "/new" => {
+            *session = Session::new(&app.model);
+            SlashOutcome::action(
+                vec![format!("(new session {})", session.id)],
+                SlashAction::New,
+            )
+        }
         "/reset" => {
             *session = Session::new(&app.model);
-            SlashOutcome::keep(vec![format!("(reset; new session id {})", session.id)])
+            SlashOutcome::action(
+                vec![format!("(reset; new session {})", session.id)],
+                SlashAction::New,
+            )
         }
         "/model" => SlashOutcome::keep(vec![format!(
             "model: {} ({})",
@@ -263,5 +276,19 @@ mod tests {
             handle("/help", &app, &mut session).unwrap().action,
             SlashAction::None
         );
+    }
+
+    #[test]
+    fn new_and_reset_start_fresh_sessions() {
+        let app = app();
+        for cmd in ["/new", "/reset"] {
+            let mut session = Session::new(&app.model);
+            session.push_message(Message::user_text("old"));
+            let old_id = session.id.clone();
+            let outcome = handle(cmd, &app, &mut session).unwrap();
+            assert_eq!(outcome.action, SlashAction::New);
+            assert_ne!(session.id, old_id);
+            assert!(session.is_empty());
+        }
     }
 }

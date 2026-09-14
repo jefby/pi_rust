@@ -18,13 +18,17 @@ pi
 ```text
 /help                show command list
 /quit  /exit         quit pi
-/reset               start a fresh session
+/new                 start a new session
+/reset               start a new session (alias of /new)
 /model               print the active model
 /tools               list builtin tools
 /cost                show accumulated token usage
 /sessions            list saved sessions
 /resume <id>         load a saved session by id
 /session             print current session id
+/tree                switch to an earlier point in the session tree (TUI)
+/fork                start a new session from a previous user message (TUI)
+/clone               duplicate the active branch into a new session
 /compact             summarize older messages into a recap
 ```
 

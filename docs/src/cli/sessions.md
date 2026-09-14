@@ -40,6 +40,7 @@ Sessions are stored as trees: every message is an entry with an `id` and a
 | `/tree` | Pick an earlier entry and continue from there (branch switch). |
 | `/fork` | Start a new session from a previous user message (the prompt is placed back in the input). |
 | `/clone` | Duplicate the active branch into a new session file. |
+| `/new` | Start a fresh, empty session (`/reset` is an alias). |
 
 `--fork <id|path>` does the same as `/clone` from the command line: it copies
 the target's active branch into a new session and opens it.

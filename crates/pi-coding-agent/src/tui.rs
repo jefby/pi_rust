@@ -419,6 +419,18 @@ impl State {
                 match outcome.action {
                     slash::SlashAction::Tree => self.open_tree(TreeMode::Switch),
                     slash::SlashAction::Fork => self.open_tree(TreeMode::Fork),
+                    slash::SlashAction::New => {
+                        // Clear the view for the fresh session.
+                        self.lines.clear();
+                        self.streaming.clear();
+                        self.thinking.clear();
+                        self.input.clear();
+                        self.cursor = 0;
+                        self.push_system(format!(
+                            "model: {} ({}) — /help for commands",
+                            self.app.model.name, self.app.model.provider
+                        ));
+                    }
                     slash::SlashAction::None => {}
                 }
                 if !outcome.keep_going {
@@ -1605,5 +1617,17 @@ mod tests {
 
         state.tree_expand();
         assert_eq!(visible_indices(state.tree.as_ref().unwrap()).len(), 3);
+    }
+
+    #[test]
+    fn new_command_clears_transcript() {
+        let mut state = test_state();
+        state.lines.push(Line::from("old line"));
+        state.session.push_message(Message::user_text("old"));
+        let (tx, _rx) = mpsc::unbounded_channel();
+        state.run_slash("/new".to_string(), &tx);
+        assert!(state.session.is_empty());
+        // Only the re-announced model line remains.
+        assert_eq!(state.lines.len(), 1);
     }
 }
