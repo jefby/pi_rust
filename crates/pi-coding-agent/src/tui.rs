@@ -50,6 +50,12 @@ struct PendingPermission {
     respond: oneshot::Sender<PermissionDecision>,
 }
 
+/// Session picker shown for a bare `-r`.
+struct Picker {
+    sessions: Vec<crate::session::SessionSummary>,
+    selected: usize,
+}
+
 struct State {
     app: AppConfig,
     permission: Arc<TuiPermission>,
@@ -67,6 +73,7 @@ struct State {
     spinner: usize,
     quit: bool,
     pending_perm: Option<PendingPermission>,
+    picker: Option<Picker>,
 }
 
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -80,9 +87,10 @@ pub async fn run_tui(
     permission: Arc<TuiPermission>,
     permission_rx: mpsc::UnboundedReceiver<PermissionRequest>,
     initial: Option<Session>,
+    pick: bool,
 ) -> anyhow::Result<()> {
     let mut terminal = ratatui::init();
-    let result = run(&mut terminal, app, permission, permission_rx, initial).await;
+    let result = run(&mut terminal, app, permission, permission_rx, initial, pick).await;
     ratatui::restore();
     result
 }
@@ -93,6 +101,7 @@ async fn run(
     permission: Arc<TuiPermission>,
     mut permission_rx: mpsc::UnboundedReceiver<PermissionRequest>,
     initial: Option<Session>,
+    pick: bool,
 ) -> anyhow::Result<()> {
     let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<UiEvent>();
 
@@ -114,8 +123,13 @@ async fn run(
         spinner: 0,
         quit: false,
         pending_perm: None,
+        picker: None,
     };
-    if !state.session.messages.is_empty() {
+    if pick {
+        // Bare `-r`: start empty and let the user choose a session.
+        state.session = Session::new(&app.model);
+        state.open_picker();
+    } else if !state.session.messages.is_empty() {
         state.replay_history();
         state.push_system(format!(
             "(resumed session {}, {} prior messages)",
@@ -181,6 +195,18 @@ impl State {
             }
             self.save();
             self.quit = true;
+            return;
+        }
+
+        // An open session picker owns the keyboard.
+        if self.picker.is_some() {
+            match key.code {
+                KeyCode::Up | KeyCode::Char('k') => self.picker_move(-1),
+                KeyCode::Down | KeyCode::Char('j') => self.picker_move(1),
+                KeyCode::Enter => self.picker_confirm(),
+                KeyCode::Esc => self.picker = None,
+                _ => {}
+            }
             return;
         }
 
@@ -427,6 +453,54 @@ impl State {
         }
     }
 
+    /// Load the session list and show the picker (bare `-r`).
+    fn open_picker(&mut self) {
+        match crate::session::list(&self.app.config_dir) {
+            Ok(sessions) if !sessions.is_empty() => {
+                self.picker = Some(Picker {
+                    sessions,
+                    selected: 0,
+                });
+            }
+            Ok(_) => self.push_system("(no saved sessions)".to_string()),
+            Err(e) => self.push_error(format!("failed to list sessions: {e}")),
+        }
+    }
+
+    fn picker_move(&mut self, delta: isize) {
+        if let Some(picker) = &mut self.picker {
+            let len = picker.sessions.len() as isize;
+            if len > 0 {
+                picker.selected = (picker.selected as isize + delta).rem_euclid(len) as usize;
+            }
+        }
+    }
+
+    fn picker_confirm(&mut self) {
+        let Some(picker) = self.picker.take() else {
+            return;
+        };
+        let Some(id) = picker.sessions.get(picker.selected).map(|s| s.id.clone()) else {
+            return;
+        };
+        match crate::session::load(&self.app.config_dir, &id) {
+            Ok(session) => {
+                self.session = session;
+                self.lines.clear();
+                self.replay_history();
+                self.push_system(format!(
+                    "(resumed session {}, {} prior messages)",
+                    self.session.id,
+                    self.session.messages.len()
+                ));
+            }
+            Err(e) => {
+                self.push_error(format!("load failed: {e}"));
+                self.picker = Some(picker);
+            }
+        }
+    }
+
     fn byte_index(&self) -> usize {
         self.input
             .char_indices()
@@ -578,6 +652,7 @@ impl State {
         if self.pending_perm.is_some() {
             self.render_permission(frame, area);
         }
+        self.render_picker(frame, area);
     }
 
     fn render_title(&self, frame: &mut ratatui::Frame, area: Rect) {
@@ -648,7 +723,7 @@ impl State {
             .block(Block::bordered().title(title))
             .wrap(Wrap { trim: false });
         frame.render_widget(paragraph, area);
-        if self.pending_perm.is_none() && cursor_row < inner_height {
+        if self.pending_perm.is_none() && self.picker.is_none() && cursor_row < inner_height {
             let x = area
                 .x
                 .saturating_add(1)
@@ -733,6 +808,61 @@ impl State {
             .wrap(Wrap { trim: false });
         frame.render_widget(paragraph, popup);
     }
+
+    fn render_picker(&self, frame: &mut ratatui::Frame, area: Rect) {
+        let Some(picker) = &self.picker else {
+            return;
+        };
+        let popup = centered_rect(80, 70, area);
+        frame.render_widget(Clear, popup);
+        let inner_height = popup.height.saturating_sub(2) as usize;
+        let start = picker
+            .selected
+            .saturating_sub(inner_height.saturating_sub(1));
+        let lines: Vec<Line> = picker
+            .sessions
+            .iter()
+            .enumerate()
+            .skip(start)
+            .take(inner_height)
+            .map(|(i, s)| {
+                let id: String = s.id.chars().take(8).collect();
+                let text = format!(
+                    "{id}  {:>3} msgs  {:<16}  {}  {}",
+                    s.turns,
+                    slash::truncate(&s.model, 16),
+                    short_time(s.updated_ms),
+                    slash::truncate(&s.first_message, 34)
+                );
+                if i == picker.selected {
+                    Line::styled(
+                        text,
+                        Style::default()
+                            .bg(Color::Cyan)
+                            .fg(Color::Black)
+                            .add_modifier(Modifier::BOLD),
+                    )
+                } else {
+                    Line::from(text)
+                }
+            })
+            .collect();
+        let block = Block::bordered()
+            .title(" resume a session   ↑/↓ · Enter · Esc new ")
+            .border_style(Style::default().fg(Color::Cyan));
+        frame.render_widget(Paragraph::new(Text::from(lines)).block(block), popup);
+    }
+}
+
+/// `MM-DD HH:MM` in local time for the picker.
+fn short_time(ms: i64) -> String {
+    chrono::DateTime::from_timestamp_millis(ms)
+        .map(|dt| {
+            dt.with_timezone(&chrono::Local)
+                .format("%m-%d %H:%M")
+                .to_string()
+        })
+        .unwrap_or_default()
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
@@ -853,6 +983,7 @@ mod tests {
             spinner: 0,
             quit: false,
             pending_perm: None,
+            picker: None,
         }
     }
 
@@ -1066,5 +1197,56 @@ mod tests {
         assert_eq!(state.lines.len(), 2);
         assert!(line_text(&state.lines[0]).contains("hello"));
         assert!(line_text(&state.lines[1]).contains("world"));
+    }
+
+    fn summary(id: &str) -> crate::session::SessionSummary {
+        crate::session::SessionSummary {
+            id: id.into(),
+            updated_ms: 0,
+            model: "deepseek-v4-flash".into(),
+            provider: "deepseek".into(),
+            first_message: "hi".into(),
+            turns: 1,
+        }
+    }
+
+    #[test]
+    fn picker_wraps_selection() {
+        let mut state = test_state();
+        state.picker = Some(Picker {
+            sessions: vec![summary("a"), summary("b"), summary("c")],
+            selected: 0,
+        });
+        state.picker_move(-1);
+        assert_eq!(state.picker.as_ref().unwrap().selected, 2);
+        state.picker_move(1);
+        assert_eq!(state.picker.as_ref().unwrap().selected, 0);
+    }
+
+    #[test]
+    fn picker_confirm_loads_selected_session() {
+        let dir = std::env::temp_dir().join(format!(
+            "pi-rs-picker-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let model = pi_ai::Model::openai_gpt_4o();
+        let mut saved = Session::new(&model);
+        saved.messages.push(Message::user_text("from picker"));
+        crate::session::save(&dir, &mut saved).unwrap();
+
+        let mut state = test_state();
+        state.app.config_dir = dir.clone();
+        state.picker = Some(Picker {
+            sessions: vec![summary(&saved.id)],
+            selected: 0,
+        });
+        state.picker_confirm();
+        assert!(state.picker.is_none());
+        assert_eq!(state.session.id, saved.id);
+        assert_eq!(state.session.messages.len(), 1);
+        std::fs::remove_dir_all(dir).ok();
     }
 }

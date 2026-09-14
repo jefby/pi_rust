@@ -21,7 +21,7 @@ file path (or the equivalent `--session`):
 ```bash
 pi -r 0193abcd-...                    # by id
 pi -r ~/.pi/agent/sessions/...jsonl  # upstream file
-pi -r                                # most recent (same as -c)
+pi -r                                # TUI: pick from a list; REPL: most recent
 pi --continue                        # most recently updated session
 pi --session 0193abcd-...            # explicit-by-path alias
 ```

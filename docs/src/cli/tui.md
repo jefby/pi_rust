@@ -36,6 +36,21 @@ The conversation pane renders model reasoning (thinking deltas) dimmed and
 italic, applies light Markdown styling to assistant messages (fenced code
 blocks, headings, `**bold**`, inline `code`), and shows tool runs inline.
 
+## Resume picker
+
+Running `pi -r` with no argument opens a picker listing recent sessions
+(id, message count, model, time, first prompt):
+
+| Key | Action |
+|-----|--------|
+| `Up` / `Down` (or `k` / `j`) | move the selection |
+| `Enter` | resume the selected session |
+| `Esc` | start a new session |
+
+When the picker is dismissed or no sessions exist, `pi` starts a fresh
+session. In the line REPL (no TTY) a bare `-r` resumes the most recent
+session instead.
+
 ## Slash commands
 
 The same commands as the [REPL](./interactive.md#slash-commands) are

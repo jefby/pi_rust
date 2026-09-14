@@ -253,19 +253,17 @@ async fn main() -> anyhow::Result<()> {
                         None
                     }
                 },
-                None if cli.continue_latest || bare_resume => {
-                    match session::latest(&app.config_dir) {
-                        Ok(Some(s)) => Some(s),
-                        Ok(None) => {
-                            eprintln!("no saved sessions to continue");
-                            None
-                        }
-                        Err(e) => {
-                            eprintln!("warning: failed to load the latest session: {e}");
-                            None
-                        }
+                None if cli.continue_latest => match session::latest(&app.config_dir) {
+                    Ok(Some(s)) => Some(s),
+                    Ok(None) => {
+                        eprintln!("no saved sessions to continue");
+                        None
                     }
-                }
+                    Err(e) => {
+                        eprintln!("warning: failed to load the latest session: {e}");
+                        None
+                    }
+                },
                 None => None,
             };
 
@@ -282,11 +280,19 @@ async fn main() -> anyhow::Result<()> {
                 }
                 let use_tui = !cli.no_tui && interactive_tty;
                 if use_tui {
+                    // Bare `-r` opens the session picker instead of auto-resuming.
+                    let pick = bare_resume && !cli.continue_latest;
                     let (perm, rx) = crate::permission::tui::TuiPermission::new();
-                    return tui::run_tui(&app, perm, rx, initial).await;
+                    return tui::run_tui(&app, perm, rx, initial, pick).await;
                 }
             }
 
+            // No TUI: bare `-r` / `--continue` resume the most recent session.
+            let initial = if initial.is_none() && (bare_resume || cli.continue_latest) {
+                session::latest(&app.config_dir).ok().flatten()
+            } else {
+                initial
+            };
             interactive::run_interactive(&app, permission, initial).await
         }
     }
