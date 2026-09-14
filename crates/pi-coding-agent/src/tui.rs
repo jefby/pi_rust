@@ -66,34 +66,249 @@ enum TreeMode {
     Fork,
 }
 
-/// Tree overlay with fold/unfold support.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TreeFilter {
+    Default,
+    NoTools,
+    UserOnly,
+    All,
+}
+
+impl TreeFilter {
+    fn next(self) -> Self {
+        match self {
+            TreeFilter::Default => TreeFilter::NoTools,
+            TreeFilter::NoTools => TreeFilter::UserOnly,
+            TreeFilter::UserOnly => TreeFilter::All,
+            TreeFilter::All => TreeFilter::Default,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            TreeFilter::Default => "default",
+            TreeFilter::NoTools => "no-tools",
+            TreeFilter::UserOnly => "user-only",
+            TreeFilter::All => "all",
+        }
+    }
+
+    fn keep(self, kind: crate::session::EntryKind) -> bool {
+        use crate::session::EntryKind;
+        match self {
+            TreeFilter::All => true,
+            TreeFilter::Default => kind != EntryKind::ToolResult,
+            TreeFilter::NoTools => {
+                !matches!(kind, EntryKind::ToolResult | EntryKind::AssistantToolOnly)
+            }
+            TreeFilter::UserOnly => kind == EntryKind::User,
+        }
+    }
+}
+
+/// Tree overlay with fold/unfold and filtering.
 struct TreeOverlay {
+    /// Every entry in depth-first (tree) order.
     items: Vec<crate::session::TreeItem>,
+    /// Index into `items`.
     selected: usize,
     collapsed: std::collections::HashSet<String>,
+    filter: TreeFilter,
     mode: TreeMode,
 }
 
-/// Indices of items whose ancestors are not collapsed.
-fn visible_indices(tree: &TreeOverlay) -> Vec<usize> {
-    let mut hidden: std::collections::HashSet<&str> = std::collections::HashSet::new();
-    let mut visible = Vec::new();
-    for (i, item) in tree.items.iter().enumerate() {
-        let parent_hidden = item
-            .parent_id
-            .as_deref()
-            .map(|p| hidden.contains(p) || tree.collapsed.contains(p))
-            .unwrap_or(false);
-        if parent_hidden {
-            hidden.insert(item.id.as_str());
-        } else {
-            visible.push(i);
-            if tree.collapsed.contains(&item.id) {
-                hidden.insert(item.id.as_str());
+/// A flattened tree row with upstream-style indentation and connectors.
+struct FlatRow {
+    item: usize,
+    display_indent: usize,
+    show_connector: bool,
+    is_last: bool,
+    gutters: Vec<(usize, bool)>,
+    is_virtual_root_child: bool,
+    foldable: bool,
+    folded: bool,
+    on_active_path: bool,
+}
+
+/// Build render rows the way upstream `pi`'s tree selector does: only branch
+/// points indent and draw connectors; single-child chains stay flat. Filtered
+/// nodes are skipped but their children are promoted; folded nodes hide their
+/// whole subtree. Subtrees containing the active leaf are ordered first.
+fn build_tree_rows(tree: &TreeOverlay, active_leaf: Option<&str>) -> Vec<FlatRow> {
+    use std::collections::{HashMap, HashSet};
+
+    let items = &tree.items;
+    let ids: HashSet<&str> = items.iter().map(|i| i.id.as_str()).collect();
+    let mut children: HashMap<&str, Vec<usize>> = HashMap::new();
+    let mut roots: Vec<usize> = Vec::new();
+    for (i, item) in items.iter().enumerate() {
+        match item.parent_id.as_deref().filter(|p| ids.contains(p)) {
+            Some(parent) => children.entry(parent).or_default().push(i),
+            None => roots.push(i),
+        }
+    }
+
+    // Subtrees that contain the active leaf are ordered first.
+    let mut contains_active: HashMap<usize, bool> = HashMap::new();
+    let mut pre = Vec::new();
+    {
+        let mut stack: Vec<usize> = roots.iter().rev().copied().collect();
+        while let Some(i) = stack.pop() {
+            pre.push(i);
+            if let Some(kids) = children.get(items[i].id.as_str()) {
+                for &k in kids.iter().rev() {
+                    stack.push(k);
+                }
             }
         }
     }
-    visible
+    for &i in pre.iter().rev() {
+        let mut has = active_leaf == Some(items[i].id.as_str());
+        if let Some(kids) = children.get(items[i].id.as_str()) {
+            for &k in kids {
+                if contains_active.get(&k).copied().unwrap_or(false) {
+                    has = true;
+                }
+            }
+        }
+        contains_active.insert(i, has);
+    }
+
+    let by_id: HashMap<&str, usize> = items
+        .iter()
+        .enumerate()
+        .map(|(i, it)| (it.id.as_str(), i))
+        .collect();
+    let mut active_path: HashSet<String> = HashSet::new();
+    let mut cursor = active_leaf.map(str::to_string);
+    while let Some(id) = cursor {
+        if !active_path.insert(id.clone()) {
+            break;
+        }
+        cursor = by_id
+            .get(id.as_str())
+            .and_then(|&i| items[i].parent_id.clone());
+    }
+
+    fn visible_children(
+        i: usize,
+        items: &[crate::session::TreeItem],
+        children: &HashMap<&str, Vec<usize>>,
+        tree: &TreeOverlay,
+        contains_active: &HashMap<usize, bool>,
+        out: &mut Vec<usize>,
+    ) {
+        if let Some(kids) = children.get(items[i].id.as_str()) {
+            let mut ordered = kids.clone();
+            ordered.sort_by_key(|&k| !contains_active.get(&k).copied().unwrap_or(false));
+            for k in ordered {
+                if tree.collapsed.contains(&items[k].id) {
+                    continue;
+                }
+                if tree.filter.keep(items[k].kind) {
+                    out.push(k);
+                } else {
+                    visible_children(k, items, children, tree, contains_active, out);
+                }
+            }
+        }
+    }
+
+    let mut vis_roots: Vec<usize> = Vec::new();
+    for &r in &roots {
+        if tree.filter.keep(items[r].kind) {
+            vis_roots.push(r);
+        } else {
+            visible_children(r, items, &children, tree, &contains_active, &mut vis_roots);
+        }
+    }
+    vis_roots.sort_by_key(|&r| !contains_active.get(&r).copied().unwrap_or(false));
+    let multiple_roots = vis_roots.len() > 1;
+
+    let mut out: Vec<FlatRow> = Vec::new();
+    #[allow(clippy::type_complexity)]
+    let mut stack: Vec<(usize, usize, bool, bool, bool, Vec<(usize, bool)>, bool)> = Vec::new();
+    let root_count = vis_roots.len();
+    for idx in (0..root_count).rev() {
+        stack.push((
+            vis_roots[idx],
+            if multiple_roots { 1 } else { 0 },
+            multiple_roots,
+            multiple_roots,
+            idx + 1 == root_count,
+            Vec::new(),
+            multiple_roots,
+        ));
+    }
+
+    while let Some((
+        i,
+        indent,
+        just_branched,
+        show_connector,
+        is_last,
+        gutters,
+        is_virtual_root_child,
+    )) = stack.pop()
+    {
+        let item = &items[i];
+        let foldable = children
+            .get(item.id.as_str())
+            .map(|k| !k.is_empty())
+            .unwrap_or(false);
+        let folded = tree.collapsed.contains(&item.id);
+        out.push(FlatRow {
+            item: i,
+            display_indent: if multiple_roots {
+                indent.saturating_sub(1)
+            } else {
+                indent
+            },
+            show_connector,
+            is_last,
+            gutters: gutters.clone(),
+            is_virtual_root_child,
+            foldable,
+            folded,
+            on_active_path: active_path.contains(&item.id),
+        });
+
+        if folded {
+            continue;
+        }
+
+        let mut kids = Vec::new();
+        visible_children(i, items, &children, tree, &contains_active, &mut kids);
+        let multiple_children = kids.len() > 1;
+        let child_indent = if multiple_children || (just_branched && indent > 0) {
+            indent + 1
+        } else {
+            indent
+        };
+        let connector_displayed = show_connector && !is_virtual_root_child;
+        let connector_position = if multiple_roots {
+            indent.saturating_sub(1).saturating_sub(1)
+        } else {
+            indent.saturating_sub(1)
+        };
+        let mut child_gutters = gutters;
+        if connector_displayed {
+            child_gutters.push((connector_position, !is_last));
+        }
+        let count = kids.len();
+        for (k, &child) in kids.iter().enumerate().rev() {
+            stack.push((
+                child,
+                child_indent,
+                multiple_children,
+                multiple_children,
+                k + 1 == count,
+                child_gutters.clone(),
+                false,
+            ));
+        }
+    }
+    out
 }
 
 struct State {
@@ -262,11 +477,18 @@ impl State {
 
         // An open tree overlay owns the keyboard.
         if self.tree.is_some() {
+            let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+            let alt = key.modifiers.contains(KeyModifiers::ALT);
             match key.code {
                 KeyCode::Up | KeyCode::Char('k') => self.tree_move(-1),
                 KeyCode::Down | KeyCode::Char('j') => self.tree_move(1),
-                KeyCode::Left | KeyCode::Char('h') => self.tree_collapse(),
-                KeyCode::Right | KeyCode::Char('l') => self.tree_expand(),
+                KeyCode::Left if ctrl || alt => self.tree_collapse(),
+                KeyCode::Right if ctrl || alt => self.tree_expand(),
+                KeyCode::Left => self.tree_move(-10),
+                KeyCode::Right => self.tree_move(10),
+                KeyCode::PageUp => self.tree_move(-10),
+                KeyCode::PageDown => self.tree_move(10),
+                KeyCode::Char('o') if ctrl => self.tree_filter_next(),
                 KeyCode::Enter => self.tree_confirm(ui_tx),
                 KeyCode::Esc => self.tree = None,
                 _ => {}
@@ -588,66 +810,131 @@ impl State {
     }
 
     fn open_tree(&mut self, mode: TreeMode) {
-        let mut items = self.session.tree_items();
-        if mode == TreeMode::Fork {
-            items.retain(|item| item.label.starts_with('❯'));
-        }
+        let items = self.session.tree_items();
         if items.is_empty() {
             self.push_system("(no entries to choose from)".to_string());
             return;
         }
-        let selected = match (mode, self.session.active_leaf.as_deref()) {
-            (TreeMode::Switch, Some(leaf)) => items
-                .iter()
-                .position(|item| item.id == leaf)
-                .unwrap_or(items.len() - 1),
-            _ => 0,
+        let filter = if mode == TreeMode::Fork {
+            TreeFilter::UserOnly
+        } else {
+            TreeFilter::Default
         };
-        self.tree = Some(TreeOverlay {
+        let mut overlay = TreeOverlay {
             items,
-            selected,
+            selected: 0,
             collapsed: Default::default(),
+            filter,
             mode,
-        });
+        };
+        // Start on the active leaf (or the first visible row).
+        let rows = build_tree_rows(&overlay, self.session.active_leaf.as_deref());
+        if let Some(leaf) = self.session.active_leaf.as_deref() {
+            if let Some(row) = rows.iter().find(|r| overlay.items[r.item].id == leaf) {
+                overlay.selected = row.item;
+            }
+        }
+        if overlay.selected == 0 {
+            if let Some(row) = rows.first() {
+                overlay.selected = row.item;
+            }
+        }
+        self.tree = Some(overlay);
     }
 
     fn tree_move(&mut self, delta: isize) {
         let Some(tree) = &self.tree else {
             return;
         };
-        let visible = visible_indices(tree);
-        let position = visible
+        let rows = build_tree_rows(tree, self.session.active_leaf.as_deref());
+        if rows.is_empty() {
+            return;
+        }
+        let position = rows
             .iter()
-            .position(|&i| i == tree.selected)
+            .position(|r| r.item == tree.selected)
             .unwrap_or(0);
-        let next = (position as isize + delta).rem_euclid(visible.len().max(1) as isize) as usize;
-        let new_selected = visible[next];
+        let next = (position as isize + delta).rem_euclid(rows.len() as isize) as usize;
+        let target = rows[next].item;
         if let Some(tree) = &mut self.tree {
-            tree.selected = new_selected;
+            tree.selected = target;
         }
     }
 
+    /// Collapse the selected subtree, or move to its parent when it is a leaf.
     fn tree_collapse(&mut self) {
-        if let Some(tree) = &mut self.tree {
-            let id = tree.items[tree.selected].id.clone();
-            let has_children = tree
-                .items
-                .iter()
-                .any(|item| item.parent_id.as_deref() == Some(id.as_str()));
-            if has_children {
-                tree.collapsed.insert(id);
-            } else if let Some(parent) = tree.items[tree.selected].parent_id.clone() {
-                if let Some(idx) = tree.items.iter().position(|item| item.id == parent) {
-                    tree.selected = idx;
-                }
+        let Some(tree) = &mut self.tree else {
+            return;
+        };
+        let item = &tree.items[tree.selected];
+        let foldable = tree
+            .items
+            .iter()
+            .any(|it| it.parent_id.as_deref() == Some(item.id.as_str()));
+        if foldable {
+            let id = item.id.clone();
+            tree.collapsed.insert(id);
+        } else if let Some(parent) = item.parent_id.clone() {
+            if let Some(idx) = tree.items.iter().position(|it| it.id == parent) {
+                tree.selected = idx;
             }
         }
     }
 
+    /// Expand the selected node, or move to its first child when already open.
     fn tree_expand(&mut self) {
+        let Some(tree) = &mut self.tree else {
+            return;
+        };
+        let id = tree.items[tree.selected].id.clone();
+        if tree.collapsed.remove(&id) {
+            return;
+        }
+        if let Some(child) = tree
+            .items
+            .iter()
+            .position(|it| it.parent_id.as_deref() == Some(id.as_str()))
+        {
+            tree.selected = child;
+        }
+    }
+
+    fn tree_filter_next(&mut self) {
         if let Some(tree) = &mut self.tree {
-            let id = tree.items[tree.selected].id.clone();
-            tree.collapsed.remove(&id);
+            tree.filter = tree.filter.next();
+        }
+        self.tree_reselect_visible();
+    }
+
+    /// Keep the selection on a visible row after filtering/folding changes.
+    fn tree_reselect_visible(&mut self) {
+        let Some(tree) = &self.tree else {
+            return;
+        };
+        let rows = build_tree_rows(tree, self.session.active_leaf.as_deref());
+        if rows.iter().any(|r| r.item == tree.selected) {
+            return;
+        }
+        let items = &tree.items;
+        let mut cursor = items[tree.selected].parent_id.clone();
+        while let Some(id) = cursor {
+            if let Some(row) = rows.iter().find(|r| items[r.item].id == id) {
+                let target = row.item;
+                if let Some(tree) = &mut self.tree {
+                    tree.selected = target;
+                }
+                return;
+            }
+            cursor = items
+                .iter()
+                .find(|it| it.id == id)
+                .and_then(|it| it.parent_id.clone());
+        }
+        if let Some(row) = rows.first() {
+            let target = row.item;
+            if let Some(tree) = &mut self.tree {
+                tree.selected = target;
+            }
         }
     }
 
@@ -655,58 +942,14 @@ impl State {
         let Some(tree) = self.tree.take() else {
             return;
         };
-        let id = tree.items[tree.selected].id.clone();
+        let selected = &tree.items[tree.selected];
+        let id = selected.id.clone();
+        let kind = selected.kind;
+        let parent = selected.parent_id.clone();
 
         match tree.mode {
-            TreeMode::Switch => {
-                let old_leaf = self.session.active_leaf.clone();
-                let abandoned = self.session.abandoned(old_leaf.as_deref(), Some(&id));
-                self.session.set_active_leaf(Some(id));
-                self.lines.clear();
-                self.replay_history();
-                self.push_system(format!(
-                    "(switched to {} messages)",
-                    self.session.messages().len()
-                ));
-                self.save();
-                if !abandoned.is_empty() && self.app.summarize_branches {
-                    self.push_system("(summarizing abandoned branch…)".to_string());
-                    let app = self.app.clone();
-                    let ui = ui_tx.clone();
-                    tokio::spawn(async move {
-                        let result = slash::summarize(&app, abandoned)
-                            .await
-                            .map_err(|e| e.to_string());
-                        let _ = ui.send(UiEvent::BranchSummary(result));
-                    });
-                } else if !abandoned.is_empty() {
-                    self.push_system(format!(
-                        "({} abandoned message(s); branch summary disabled)",
-                        abandoned.len()
-                    ));
-                }
-            }
             TreeMode::Fork => {
-                let prompt = self
-                    .session
-                    .entries
-                    .iter()
-                    .find(|e| e.id == id)
-                    .map(|e| match &e.message {
-                        Some(Message::User { content, .. }) => content
-                            .iter()
-                            .filter_map(|c| c.as_text())
-                            .collect::<Vec<_>>()
-                            .join(""),
-                        _ => String::new(),
-                    })
-                    .unwrap_or_default();
-                let parent = self
-                    .session
-                    .entries
-                    .iter()
-                    .find(|e| e.id == id)
-                    .and_then(|e| e.parent_id.clone());
+                let prompt = self.user_text(&id);
                 let prefix: Vec<Message> = parent
                     .as_deref()
                     .map(|p| {
@@ -728,7 +971,76 @@ impl State {
                 self.push_system(format!("(forked into new session {})", self.session.id));
                 self.save();
             }
+            TreeMode::Switch => {
+                use crate::session::EntryKind;
+                // Selecting a user message moves the leaf to its *parent* and
+                // puts the message back in the editor (edit & resubmit creates
+                // a new branch). Any other entry becomes the new leaf.
+                let (new_leaf, prompt) = if kind == EntryKind::User {
+                    (parent.clone(), self.user_text(&id))
+                } else {
+                    (Some(id.clone()), String::new())
+                };
+                let old_leaf = self.session.active_leaf.clone();
+                let abandoned = self
+                    .session
+                    .abandoned(old_leaf.as_deref(), new_leaf.as_deref());
+                self.session.set_active_leaf(new_leaf);
+                self.lines.clear();
+                self.replay_history();
+                self.input = prompt;
+                self.cursor = self.input.chars().count();
+                self.push_system(format!(
+                    "(switched to {} messages)",
+                    self.session.messages().len()
+                ));
+                self.save();
+                self.summarize_abandoned(abandoned, ui_tx);
+            }
         }
+    }
+
+    /// Text of a user entry, if it is one.
+    fn user_text(&self, id: &str) -> String {
+        self.session
+            .entries
+            .iter()
+            .find(|e| e.id == id)
+            .map(|e| match &e.message {
+                Some(Message::User { content, .. }) => content
+                    .iter()
+                    .filter_map(|c| c.as_text())
+                    .collect::<Vec<_>>()
+                    .join(""),
+                _ => String::new(),
+            })
+            .unwrap_or_default()
+    }
+
+    fn summarize_abandoned(
+        &mut self,
+        abandoned: Vec<Message>,
+        ui_tx: &mpsc::UnboundedSender<UiEvent>,
+    ) {
+        if abandoned.is_empty() {
+            return;
+        }
+        if !self.app.summarize_branches {
+            self.push_system(format!(
+                "({} abandoned message(s); branch summary disabled)",
+                abandoned.len()
+            ));
+            return;
+        }
+        self.push_system("(summarizing abandoned branch…)".to_string());
+        let app = self.app.clone();
+        let ui = ui_tx.clone();
+        tokio::spawn(async move {
+            let result = slash::summarize(&app, abandoned)
+                .await
+                .map_err(|e| e.to_string());
+            let _ = ui.send(UiEvent::BranchSummary(result));
+        });
     }
 
     fn finish_branch_summary(&mut self, result: Result<String, String>) {
@@ -1215,50 +1527,99 @@ impl State {
         let Some(tree) = &self.tree else {
             return;
         };
-        let popup = centered_rect(84, 74, area);
+        let popup = centered_rect(86, 76, area);
         frame.render_widget(Clear, popup);
+        let rows = build_tree_rows(tree, self.session.active_leaf.as_deref());
         let inner_height = popup.height.saturating_sub(2) as usize;
-        let visible = visible_indices(tree);
-        let position = visible
+        let list_height = inner_height.saturating_sub(1);
+        let position = rows
             .iter()
-            .position(|&i| i == tree.selected)
+            .position(|r| r.item == tree.selected)
             .unwrap_or(0);
-        let start = position.saturating_sub(inner_height.saturating_sub(1));
-        let shown = &visible[start..visible.len().min(start + inner_height)];
-        let lines: Vec<Line> = shown
-            .iter()
-            .map(|&i| {
-                let item = &tree.items[i];
-                let has_children = tree
-                    .items
-                    .iter()
-                    .any(|child| child.parent_id.as_deref() == Some(item.id.as_str()));
-                let marker = if has_children {
-                    if tree.collapsed.contains(&item.id) {
-                        "▸ "
+        let start = position.saturating_sub(list_height.saturating_sub(1));
+        let end = (start + list_height).min(rows.len());
+
+        let mut lines: Vec<Line> = Vec::new();
+        for row in &rows[start..end] {
+            let item = &tree.items[row.item];
+            let selected = row.item == tree.selected;
+            let connector_shown = row.show_connector && !row.is_virtual_root_child;
+            let connector_position = row.display_indent.saturating_sub(1);
+            let mut prefix = String::new();
+            for i in 0..row.display_indent * 3 {
+                let level = i / 3;
+                let pos = i % 3;
+                if let Some((_, show)) = row.gutters.iter().find(|(p, _)| *p == level) {
+                    prefix.push(if pos == 0 {
+                        if *show {
+                            '│'
+                        } else {
+                            ' '
+                        }
                     } else {
-                        "▾ "
+                        ' '
+                    });
+                } else if connector_shown && level == connector_position {
+                    match pos {
+                        0 => prefix.push(if row.is_last { '└' } else { '├' }),
+                        1 => prefix.push(if row.folded {
+                            '⊞'
+                        } else if row.foldable {
+                            '⊟'
+                        } else {
+                            '─'
+                        }),
+                        _ => prefix.push(' '),
                     }
                 } else {
-                    "  "
-                };
-                let text = format!("{}{}{}", "  ".repeat(item.depth), marker, item.label);
-                if i == tree.selected {
-                    Line::styled(
-                        text,
-                        Style::default()
-                            .bg(Color::Cyan)
-                            .fg(Color::Black)
-                            .add_modifier(Modifier::BOLD),
-                    )
-                } else {
-                    Line::from(text)
+                    prefix.push(' ');
                 }
-            })
-            .collect();
+            }
+            let fold_marker = if row.folded && !connector_shown {
+                "⊞ "
+            } else {
+                ""
+            };
+            let path_marker = if row.on_active_path { "• " } else { "" };
+            let cursor = if selected { "› " } else { "  " };
+
+            if selected {
+                let text = format!("{cursor}{prefix}{fold_marker}{path_marker}{}", item.label);
+                lines.push(Line::styled(
+                    text,
+                    Style::default()
+                        .bg(Color::Cyan)
+                        .fg(Color::Black)
+                        .add_modifier(Modifier::BOLD),
+                ));
+            } else {
+                lines.push(Line::from(vec![
+                    Span::raw(cursor),
+                    Span::styled(prefix, Style::default().fg(Color::DarkGray)),
+                    Span::styled(
+                        format!("{fold_marker}{path_marker}"),
+                        Style::default().fg(Color::Cyan),
+                    ),
+                    Span::styled(item.label.clone(), Style::default()),
+                ]));
+            }
+        }
+
+        lines.push(Line::styled(
+            format!(
+                "  ({}/{}) {}",
+                if rows.is_empty() { 0 } else { position + 1 },
+                rows.len(),
+                tree.filter.label()
+            ),
+            Style::default().fg(Color::DarkGray),
+        ));
+
         let title = match tree.mode {
-            TreeMode::Switch => " session tree   ↑/↓ · ←/→ fold · Enter switch · Esc cancel ",
-            TreeMode::Fork => " fork from a user message   ↑/↓ · Enter fork · Esc cancel ",
+            TreeMode::Switch => {
+                " session tree   ↑/↓ · ←/→ page · ctrl+←/→ fold · ctrl+o filter · Enter select · Esc "
+            }
+            TreeMode::Fork => " fork from a user message   ↑/↓ · Enter fork · Esc ",
         };
         let block = Block::bordered()
             .title(title)
@@ -1749,21 +2110,49 @@ mod tests {
     #[test]
     fn tree_fork_starts_new_session_with_prefix() {
         let mut state = test_state();
-        state.session.push_message(Message::user_text("first"));
+        let first = state.session.push_message(Message::user_text("first"));
         state.session.push_message(assistant("ok"));
-        state.session.push_message(Message::user_text("second"));
+        let second = state.session.push_message(Message::user_text("second"));
         let original_id = state.session.id.clone();
 
         state.open_tree(TreeMode::Fork);
-        // Only user entries are listed.
-        assert_eq!(state.tree.as_ref().unwrap().items.len(), 2);
-        state.tree_move(1);
+        // Only user entries are visible (UserOnly filter).
+        let tree = state.tree.as_ref().unwrap();
+        let rows = build_tree_rows(tree, state.session.active_leaf.as_deref());
+        assert_eq!(rows.len(), 2);
+        // Starts on the active leaf ("second").
+        assert_eq!(tree.items[tree.selected].id, second);
+        assert_ne!(tree.items[tree.selected].id, first);
+
         let (tx, _rx) = mpsc::unbounded_channel();
         state.tree_confirm(&tx);
 
         assert_ne!(state.session.id, original_id);
+        // Prefix is the branch up to the selected message's parent (first + ok).
         assert_eq!(state.session.messages().len(), 2);
         assert_eq!(state.input, "second");
+    }
+
+    #[test]
+    fn tree_select_user_moves_to_parent_and_preloads_prompt() {
+        let mut state = test_state();
+        state.app.summarize_branches = false;
+        state.session.push_message(Message::user_text("root"));
+        let reply = state.session.push_message(assistant("reply"));
+        let follow_up = state.session.push_message(Message::user_text("follow up"));
+        state.session.push_message(assistant("more"));
+
+        state.open_tree(TreeMode::Switch);
+        let tree = state.tree.as_mut().unwrap();
+        tree.selected = tree.items.iter().position(|it| it.id == follow_up).unwrap();
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        state.tree_confirm(&tx);
+
+        // The leaf moved to the selected user message's parent, and the prompt
+        // is back in the editor for editing/resubmission.
+        assert_eq!(state.session.active_leaf.as_deref(), Some(reply.as_str()));
+        assert_eq!(state.input, "follow up");
     }
 
     #[test]
@@ -1773,14 +2162,43 @@ mod tests {
         state.session.push_message(assistant("b"));
         state.session.push_message(Message::user_text("c"));
         state.open_tree(TreeMode::Switch);
-        assert_eq!(visible_indices(state.tree.as_ref().unwrap()).len(), 3);
+        let rows = |s: &State| {
+            build_tree_rows(s.tree.as_ref().unwrap(), s.session.active_leaf.as_deref()).len()
+        };
+        assert_eq!(rows(&state), 3);
 
         state.tree.as_mut().unwrap().selected = 0;
         state.tree_collapse();
-        assert_eq!(visible_indices(state.tree.as_ref().unwrap()).len(), 1);
+        assert_eq!(rows(&state), 1);
 
         state.tree_expand();
-        assert_eq!(visible_indices(state.tree.as_ref().unwrap()).len(), 3);
+        assert_eq!(rows(&state), 3);
+    }
+
+    #[test]
+    fn tree_indents_only_at_branch_points() {
+        // a(user) -> b(assistant) -> { c(user), d(user) }
+        let mut state = test_state();
+        state.session.push_message(Message::user_text("a"));
+        let b = state.session.push_message(assistant("b"));
+        state.session.push_message(Message::user_text("c"));
+        state.session.set_active_leaf(Some(b));
+        state.session.push_message(Message::user_text("d"));
+        state.open_tree(TreeMode::Switch);
+
+        let tree = state.tree.as_ref().unwrap();
+        let rows = build_tree_rows(tree, state.session.active_leaf.as_deref());
+        assert_eq!(rows.len(), 4);
+        // a and b are a single-child chain: flat, no connector.
+        assert_eq!(rows[0].display_indent, 0);
+        assert!(!rows[0].show_connector);
+        assert_eq!(rows[1].display_indent, 0);
+        // c and d are the branch under b: indent 1, `├─` then `└─`.
+        assert_eq!(rows[2].display_indent, 1);
+        assert!(rows[2].show_connector);
+        assert!(!rows[2].is_last);
+        assert!(rows[3].is_last);
+        assert_eq!(rows[3].display_indent, 1);
     }
 
     #[test]

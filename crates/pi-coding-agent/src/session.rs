@@ -195,28 +195,52 @@ impl Session {
         from[i..].iter().filter_map(|e| e.message.clone()).collect()
     }
 
-    /// Label items for the `/tree` overlay. Used by the `tui` feature.
+    /// Label items for the `/tree` overlay, in depth-first (tree) order.
+    /// Used by the `tui` feature.
     #[allow(dead_code)]
     pub fn tree_items(&self) -> Vec<TreeItem> {
-        let mut depth: HashMap<&str, usize> = HashMap::new();
-        let mut items = Vec::with_capacity(self.entries.len());
-        for entry in &self.entries {
-            let d = entry
-                .parent_id
-                .as_deref()
-                .and_then(|parent| depth.get(parent).copied())
-                .map(|d| d + 1)
-                .unwrap_or(0);
-            depth.insert(entry.id.as_str(), d);
-            items.push(TreeItem {
+        let ids: std::collections::HashSet<&str> =
+            self.entries.iter().map(|e| e.id.as_str()).collect();
+        let mut children: HashMap<Option<&str>, Vec<usize>> = HashMap::new();
+        let mut roots: Vec<usize> = Vec::new();
+        for (i, entry) in self.entries.iter().enumerate() {
+            match entry.parent_id.as_deref().filter(|p| ids.contains(p)) {
+                Some(parent) => children.entry(Some(parent)).or_default().push(i),
+                None => roots.push(i),
+            }
+        }
+
+        let mut out = Vec::with_capacity(self.entries.len());
+        let mut stack: Vec<(usize, usize)> = roots.iter().rev().map(|&r| (r, 0)).collect();
+        while let Some((i, depth)) = stack.pop() {
+            let entry = &self.entries[i];
+            out.push(TreeItem {
                 id: entry.id.clone(),
                 parent_id: entry.parent_id.clone(),
-                depth: d,
+                depth,
+                kind: entry_kind(&entry.message),
                 label: entry_label(entry),
             });
+            if let Some(children) = children.get(&Some(entry.id.as_str())) {
+                for &child in children.iter().rev() {
+                    stack.push((child, depth + 1));
+                }
+            }
         }
-        items
+        out
     }
+}
+
+/// What an entry is, for tree filtering and selection behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntryKind {
+    User,
+    /// Assistant message that contains non-empty text.
+    AssistantText,
+    /// Assistant message that only contains tool calls.
+    AssistantToolOnly,
+    ToolResult,
+    Other,
 }
 
 /// A row of the `/tree` overlay. Used by the `tui` feature.
@@ -226,43 +250,81 @@ pub struct TreeItem {
     pub id: String,
     pub parent_id: Option<String>,
     pub depth: usize,
+    pub kind: EntryKind,
     pub label: String,
 }
 
 // Entry labels for the `/tree` overlay; only used by the `tui` feature.
 #[allow(dead_code)]
+fn entry_kind(message: &Option<Message>) -> EntryKind {
+    match message {
+        Some(Message::User { .. }) => EntryKind::User,
+        Some(Message::ToolResult(_)) => EntryKind::ToolResult,
+        Some(Message::Assistant(a)) => {
+            let has_text = a.content.iter().any(|c| match c {
+                Content::Text { text } => !text.trim().is_empty(),
+                _ => false,
+            });
+            if has_text {
+                EntryKind::AssistantText
+            } else {
+                EntryKind::AssistantToolOnly
+            }
+        }
+        None => EntryKind::Other,
+    }
+}
+
+#[allow(dead_code)]
 fn entry_label(entry: &Entry) -> String {
     match &entry.message {
         Some(Message::User { content, .. }) => {
-            format!("❯ {}", truncate(&blocks_text(content), 60))
+            format!("user: {}", truncate(&blocks_text(content), 80))
         }
         Some(Message::Assistant(a)) => {
             let text = blocks_text(&a.content);
-            let tool = a.content.iter().find_map(|c| match c {
-                Content::ToolCall { name, .. } => Some(name.as_str()),
-                _ => None,
-            });
-            match tool {
-                Some(name) if text.is_empty() => format!("  [tool: {name}]"),
-                Some(name) => format!("  {} [tool: {name}]", truncate(&text, 48)),
-                None => format!("  {}", truncate(&text, 60)),
+            let text = text.trim();
+            if !text.is_empty() {
+                format!("assistant: {}", truncate(text, 80))
+            } else if a.stop_reason == StopReason::Aborted {
+                "assistant: (aborted)".to_string()
+            } else if let Some(err) = &a.error_message {
+                format!("assistant: {}", truncate(err, 80))
+            } else {
+                "assistant: (no content)".to_string()
             }
         }
-        Some(Message::ToolResult(tr)) => {
-            format!(
-                "    [{}: {}]",
-                tr.tool_name,
-                if tr.is_error { "error" } else { "ok" }
-            )
-        }
+        Some(Message::ToolResult(tr)) => format!("[tool: {}]", tr.tool_name),
         None => {
-            let kind = entry
-                .raw
-                .as_ref()
+            let raw = entry.raw.as_ref();
+            let kind = raw
                 .and_then(|v| v.get("type"))
                 .and_then(Value::as_str)
                 .unwrap_or("entry");
-            format!("  · {kind}")
+            match kind {
+                "model_change" => {
+                    let model = raw
+                        .and_then(|v| v.get("modelId"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("?");
+                    format!("[model: {model}]")
+                }
+                "thinking_level_change" => {
+                    let level = raw
+                        .and_then(|v| v.get("thinkingLevel"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("?");
+                    format!("[thinking: {level}]")
+                }
+                "custom" => {
+                    let custom_type = raw
+                        .and_then(|v| v.get("customType"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("custom");
+                    format!("[custom: {custom_type}]")
+                }
+                other => format!("[{other}]"),
+            }
         }
     }
 }

@@ -54,11 +54,28 @@ title.
 
 ## Session tree
 
-`/tree` opens an overlay of the current session's entries (indented by depth);
-`↑`/`↓` select, `←`/`→` fold/unfold a subtree, `Enter` switches the active leaf
-to that entry (and summarizes the branch you left), `Esc` cancels. `/fork` opens
-the same overlay restricted to user messages and starts a new session from the
-selected one, with that prompt placed back in the input. See
+`/tree` opens the session as a tree, rendered like upstream `pi`: only branch
+points indent and draw connectors (`├─`/`└─`, `─`/`⊟`/`⊞`), single-child chains
+stay flat, the active branch is ordered first, and the current path is marked
+with `•`.
+
+| Key | Action |
+|-----|--------|
+| `↑` / `↓` | move the selection |
+| `←` / `→` | page up / down |
+| `Ctrl+←` / `Ctrl+→` (or `Alt+←`/`Alt+→`) | fold / unfold |
+| `Ctrl+O` | cycle filter: `default`, `no-tools`, `user-only`, `all` |
+| `Enter` | select |
+| `Esc` | cancel |
+
+Selection matches upstream: choosing a **user** message moves the leaf to its
+parent and puts that prompt back in the editor (edit & resubmit creates a new
+branch); choosing any other entry moves the leaf to that entry. The abandoned
+branch is summarized when branch summaries are enabled. The footer shows
+`(selected/total) filter`.
+
+`/fork` opens the same view restricted to user messages and starts a new
+session from the selected one, with that prompt placed back in the input. See
 [Sessions](./sessions.md#branching-session-tree).
 
 The conversation pane renders model reasoning (thinking deltas) dimmed and
