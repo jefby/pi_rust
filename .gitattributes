@@ -1,0 +1,3 @@
+# Keep prebuilt binaries byte-for-byte; never apply text normalization.
+*.zip binary
+*.exe binary
