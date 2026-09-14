@@ -54,3 +54,29 @@ PI_MODEL=claude-opus-4-7   pi -p "..."   # Anthropic
 PI_MODEL=gpt-4o            pi -p "..."   # OpenAI
 PI_MODEL=gemini-2.0-flash  pi -p "..."   # Google
 ```
+
+## Reusing the upstream `pi` configuration
+
+The CLI reads the TypeScript `pi` agent directory (`~/.pi/agent`, overridable
+with `PI_CODING_AGENT_DIR`) so both share model selection and credentials:
+
+| File | Used for |
+|------|----------|
+| `settings.json` | `defaultProvider`, `defaultModel`, `defaultThinkingLevel` |
+| `auth.json` | per-provider API keys (`{"type":"api_key","key":"..."}`) |
+| `models.json` | custom providers (`baseUrl`, `api`, `apiKey`, `models`) |
+
+The active model is resolved in this order:
+
+1. `-m` / `PI_MODEL` / `config.toml` naming a built-in alias
+2. a model declared by a custom provider in `models.json`
+3. the upstream `settings.json` default provider + model
+4. the environment-key fallback described above
+
+Provider `api` + base URL come from `models.json` when present, otherwise from a
+built-in table (`anthropic`, `openai`, `google`, `deepseek`, `openrouter`,
+`groq`, `xai`, `mistral`, `together`, `fireworks`, `cerebras`, `moonshotai`,
+`moonshotai-cn`, `kimi-coding`). With a stock upstream install, running `pi`
+with no flags picks up e.g. `deepseek/deepseek-v4-flash` and the matching key
+from `auth.json` with no extra setup. Set `RUST_LOG=debug` to print the
+resolved provider, model, base URL, and whether a key was found.

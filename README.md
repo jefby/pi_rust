@@ -98,6 +98,15 @@ then `cmd.exe`. Install [Git for Windows](https://git-scm.com/download/win) for
 Unix-compatible commands. See
 [docs/src/install.md](./docs/src/install.md#windows) for build prerequisites.
 
+### Reusing the upstream `pi` config
+
+The CLI reads `~/.pi/agent` (`PI_CODING_AGENT_DIR` to override) so it shares
+model selection and credentials with the TypeScript `pi`:
+`settings.json` (default provider/model/thinking), `auth.json` (API keys), and
+`models.json` (custom providers). With a stock upstream install, running `pi`
+with no flags picks up e.g. `deepseek/deepseek-v4-flash` and its key
+automatically. `RUST_LOG=debug` prints the resolved provider/model/base URL.
+
 ## OpenAI-compatible providers
 
 Any base URL whose API matches OpenAI Chat Completions works through the
