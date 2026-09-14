@@ -21,7 +21,7 @@ Expand-Archive .\prebuilt\win_x64\pi-1.2.0-windows-x86_64.zip -DestinationPath .
 .\pi\pi.exe --help
 .\pi\pi.exe                       # starts the TUI on an interactive terminal
 .\pi\pi.exe --no-tui              # line REPL instead
-.\pi\pi.exe -r <id|file.jsonl>    # resume a session (bare -r = most recent)
+.\pi\pi.exe -r <id|file.jsonl>    # resume a session (bare -r opens a picker)
 .\pi\pi.exe -p "List the files in this directory"
 ```
 
@@ -58,16 +58,16 @@ See [`docs/src/cli/tui.md`](../../docs/src/cli/tui.md).
 | Field | Value |
 |-------|-------|
 | Version | `pi 1.2.0` |
-| Commit | `edecb4c` (`feat/windows`) |
+| Commit | `02eb732` (`feat/windows`) |
 | Built on | 2026-09-14 |
 | Target | `x86_64-pc-windows-gnu` |
 | Features | `tui` |
 | Toolchain | rustc 1.98.1 (stable) |
 | C compiler | w64devkit GCC 16.2.0 (MinGW-w64) |
 | Post-processing | `strip --strip-all`, then zip |
-| Uncompressed `pi.exe` | 12,450,304 bytes (~11.9 MiB) |
-| SHA-256 (`pi.exe`) | `f880021e6bac8ba6c1a07d3d76fbd3af0ac82b241fc6c318013ac27dea207d44` |
-| SHA-256 (`.zip`) | `e5883917e87bf46dc1407491799fafdb132bf60415eabf044854778b636f1a27` |
+| Uncompressed `pi.exe` | 12,480,000 bytes (~11.9 MiB) |
+| SHA-256 (`pi.exe`) | `2c30d4c95a2845c88dce8737276c01164f6325eb8eb79f252d23b730379ce4eb` |
+| SHA-256 (`.zip`) | `6c89dbb738810061131fefb5fc0cf03e05cdbab7545d6f7c67831d80939869be` |
 
 Reproduce with:
 
