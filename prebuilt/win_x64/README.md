@@ -58,16 +58,16 @@ See [`docs/src/cli/tui.md`](../../docs/src/cli/tui.md).
 | Field | Value |
 |-------|-------|
 | Version | `pi 1.2.0` |
-| Commit | `9869676` (`feat/windows`) |
+| Commit | `edecb4c` (`feat/windows`) |
 | Built on | 2026-09-14 |
 | Target | `x86_64-pc-windows-gnu` |
 | Features | `tui` |
 | Toolchain | rustc 1.98.1 (stable) |
 | C compiler | w64devkit GCC 16.2.0 (MinGW-w64) |
 | Post-processing | `strip --strip-all`, then zip |
-| Uncompressed `pi.exe` | 12,439,040 bytes (~11.9 MiB) |
-| SHA-256 (`pi.exe`) | `22eaea01a8c223befbd39ceabc7e1d338237870236076e229d090cdac3a41a49` |
-| SHA-256 (`.zip`) | `ec3a3ad1010cca8a9ccc47c7c49c31b67a2dd3a0d51b6b1b7bfeebbb1ed44a57` |
+| Uncompressed `pi.exe` | 12,450,304 bytes (~11.9 MiB) |
+| SHA-256 (`pi.exe`) | `f880021e6bac8ba6c1a07d3d76fbd3af0ac82b241fc6c318013ac27dea207d44` |
+| SHA-256 (`.zip`) | `e5883917e87bf46dc1407491799fafdb132bf60415eabf044854778b636f1a27` |
 
 Reproduce with:
 
