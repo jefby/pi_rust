@@ -6,7 +6,7 @@ Ready-to-run `pi` CLI for 64-bit Windows. No Rust toolchain required.
 
 | File | Size | Description |
 |------|------|-------------|
-| `pi-1.2.0-windows-x86_64.zip` | 4.6 MB | Zip archive containing `pi.exe` |
+| `pi-1.2.0-windows-x86_64.zip` | 4.9 MB | Zip archive containing `pi.exe` |
 
 ## Usage
 
@@ -32,20 +32,25 @@ unzip prebuilt/win_x64/pi-1.2.0-windows-x86_64.zip -d pi
 > [Git for Windows](https://git-scm.com/download/win) for Unix-compatible
 > commands. See [`docs/src/install.md`](../../docs/src/install.md#windows).
 
+The CLI reuses the upstream `pi` config under `~/.pi/agent`
+(`settings.json` / `auth.json` / `models.json`), so the model, credentials,
+and custom providers you already configured for the TypeScript `pi` apply
+here too. Set `RUST_LOG=debug` to print the resolved provider/model/base URL.
+
 ## Build provenance
 
 | Field | Value |
 |-------|-------|
 | Version | `pi 1.2.0` |
-| Commit | `9da489a` (`feat/windows`) |
+| Commit | `e0de9dc` (`feat/windows`) |
 | Built on | 2026-09-14 |
 | Target | `x86_64-pc-windows-gnu` |
 | Toolchain | rustc 1.98.1 (stable) |
 | C compiler | w64devkit GCC 16.2.0 (MinGW-w64) |
 | Post-processing | `strip --strip-all`, then zip |
-| Uncompressed `pi.exe` | 11,271,680 bytes (~10.8 MiB) |
-| SHA-256 (`pi.exe`) | `4c672aa8cd9972e3a1c4e0ceea9e9a851e3167de1fb228855b79cfe4ba7de23d` |
-| SHA-256 (`.zip`) | `deee78930b3e9c0f6e363bc9a068d21c758762be39f51421d38bc716792dc703` |
+| Uncompressed `pi.exe` | 11,327,488 bytes (~10.8 MiB) |
+| SHA-256 (`pi.exe`) | `1657b1d9644205c3286721f1768bd64c243c0e1f4cafeec89a67f2ff63859383` |
+| SHA-256 (`.zip`) | `d40aa92105e0bf176a7ddcbbaef9af128c22f537de41b67ef9717bb89e0779eb` |
 
 Reproduce with:
 
