@@ -29,6 +29,13 @@ pi --session 0193abcd-...            # explicit-by-path alias
 Inside the REPL you can also use `/resume <id>` to swap to a saved
 session, or `/session` to print the current session id.
 
+## When sessions are saved
+
+The transcript is written to disk **before each turn runs** and again when the
+turn finishes, so an interrupt (Ctrl+C) or crash still leaves a resumable
+session. In the TUI, Ctrl+C records whatever the assistant streamed so far as
+an aborted message before exiting.
+
 ## Interop with upstream `pi`
 
 The upstream TypeScript `pi` stores sessions as **JSONL** under

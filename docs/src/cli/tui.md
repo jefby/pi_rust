@@ -28,7 +28,7 @@ it enabled.
 | `Enter` | send the message |
 | `Shift+Enter` | insert a newline (multi-line input) |
 | `PageUp` / `PageDown` / `Up` / `Down` | scroll the conversation |
-| `Ctrl+C` | quit |
+| `Ctrl+C` | save and quit (an in-flight turn is recorded as an aborted message) |
 | `Ctrl+D` | quit when the input is empty |
 | `y` / `a` / `n` | answer a permission prompt (allow / allow session / deny) |
 

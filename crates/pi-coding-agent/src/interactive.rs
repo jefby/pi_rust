@@ -74,9 +74,13 @@ pub async fn run_interactive(
             .with_api_key(app.api_key.clone())
             .with_permission(permission.clone());
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let user = Message::user_text(prompt);
-        let mut history = session.messages.clone();
-        history.push(user);
+        // Persist the user message before the turn so an interrupt still leaves
+        // a resumable session on disk.
+        session.messages.push(Message::user_text(prompt));
+        if let Err(e) = crate::session::save(&app.config_dir, &session) {
+            eprintln!("(warning: session save failed: {e})");
+        }
+        let history = session.messages.clone();
 
         let cfg_cloned = cfg.clone();
         let handle =

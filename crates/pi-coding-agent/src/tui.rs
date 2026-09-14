@@ -172,8 +172,13 @@ async fn run(
 
 impl State {
     fn on_key(&mut self, key: KeyEvent, ui_tx: &mpsc::UnboundedSender<UiEvent>) {
-        // Ctrl+C always quits.
+        // Ctrl+C saves and quits; if a turn is in flight, record what streamed.
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+            self.flush_thinking();
+            if self.busy {
+                self.record_partial_assistant();
+            }
+            self.save();
             self.quit = true;
             return;
         }
@@ -268,15 +273,18 @@ impl State {
         self.follow = true;
         self.busy = true;
 
+        // Persist the user message *before* the turn runs so an interrupt
+        // (Ctrl+C) or crash still leaves a resumable session.
+        self.session.messages.push(Message::user_text(prompt));
+        self.save();
+
         let cfg = AgentConfig::new(self.app.model.clone(), self.system_prompt.clone())
             .with_tools(default_tools())
             .with_max_turns(self.app.max_turns)
             .with_thinking(self.app.thinking_level)
             .with_api_key(self.app.api_key.clone())
             .with_permission(self.permission.clone());
-        let user = Message::user_text(prompt);
-        let mut history = self.session.messages.clone();
-        history.push(user);
+        let history = self.session.messages.clone();
 
         let ui = ui_tx.clone();
         tokio::spawn(async move {
@@ -375,18 +383,41 @@ impl State {
 
     fn finish_turn(&mut self, res: pi_agent::Result<AgentRun>) {
         match res {
-            Ok(run) => {
-                self.session.replace_messages(run.messages);
-                self.save();
+            Ok(run) => self.session.replace_messages(run.messages),
+            Err(e) => {
+                self.push_error(format!("agent error: {e}"));
+                self.record_partial_assistant();
             }
-            Err(e) => self.push_error(format!("agent error: {e}")),
         }
         if !self.streaming.is_empty() {
             let text = std::mem::take(&mut self.streaming);
             self.push_assistant(text);
         }
         self.flush_thinking();
+        self.save();
         self.busy = false;
+    }
+
+    /// Persist whatever assistant text streamed so far as an aborted assistant
+    /// message, keeping the transcript alternating and resumable.
+    fn record_partial_assistant(&mut self) {
+        if self.streaming.is_empty() {
+            return;
+        }
+        let text = std::mem::take(&mut self.streaming);
+        self.session
+            .messages
+            .push(Message::Assistant(pi_ai::AssistantMessage {
+                content: vec![Content::text(text.clone())],
+                api: self.app.model.api.clone(),
+                provider: self.app.model.provider.clone(),
+                model: self.app.model.id.clone(),
+                usage: pi_ai::Usage::default(),
+                stop_reason: pi_ai::StopReason::Aborted,
+                error_message: None,
+                timestamp: pi_ai::now_ms(),
+            }));
+        self.push_assistant(text);
     }
 
     fn save(&mut self) {
@@ -916,5 +947,20 @@ mod tests {
         assert!(line.spans[1].style.add_modifier.contains(Modifier::BOLD));
         assert_eq!(line.spans[3].content.as_ref(), "c");
         assert_eq!(line.spans[3].style.fg, Some(Color::Yellow));
+    }
+
+    #[test]
+    fn interrupt_records_partial_assistant() {
+        let mut state = test_state();
+        state.streaming = "partial answer".into();
+        state.record_partial_assistant();
+        assert!(state.streaming.is_empty());
+        match state.session.messages.last() {
+            Some(Message::Assistant(a)) => {
+                assert_eq!(a.stop_reason, pi_ai::StopReason::Aborted);
+                assert_eq!(a.content[0].as_text(), Some("partial answer"));
+            }
+            other => panic!("expected assistant, got {other:?}"),
+        }
     }
 }
