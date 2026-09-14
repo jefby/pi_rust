@@ -64,6 +64,10 @@ struct Cli {
     #[arg(long)]
     session: Option<String>,
 
+    /// Fork a session (id or path) into a new session and open it.
+    #[arg(long)]
+    fork: Option<String>,
+
     /// Use the full-screen TUI (requires a build with `--features tui`).
     #[arg(long)]
     tui: bool,
@@ -234,6 +238,28 @@ async fn main() -> anyhow::Result<()> {
         Arc::new(CliPermission::new(Mode::Interactive))
     };
 
+    // `--fork`: duplicate an existing session's active branch into a new file.
+    let forked = match cli.fork.clone() {
+        Some(target) => match load_session_target(&app.config_dir, &target) {
+            Ok(source) => {
+                let mut new_session = session::Session::new(&app.model);
+                new_session.replace_messages(source.messages());
+                session::save(&app.config_dir, &mut new_session)?;
+                eprintln!(
+                    "forked {} message(s) from {target} into new session {}",
+                    new_session.branch().len(),
+                    new_session.id
+                );
+                Some(new_session)
+            }
+            Err(e) => {
+                eprintln!("warning: fork failed: {e}");
+                None
+            }
+        },
+        None => None,
+    };
+
     // `-r` / `--resume` may carry a target or be bare (=> most recent).
     let resume_target = cli
         .resume
@@ -245,26 +271,30 @@ async fn main() -> anyhow::Result<()> {
     match (cli.prompt, resume_target) {
         (Some(p), _) => print_mode::run_print(&app, p, permission, json).await,
         (None, resume_id) => {
-            let initial = match resume_id {
-                Some(target) => match load_session_target(&app.config_dir, &target) {
-                    Ok(s) => Some(s),
-                    Err(e) => {
-                        eprintln!("warning: failed to load session {target}: {e}");
-                        None
-                    }
-                },
-                None if cli.continue_latest => match session::latest(&app.config_dir) {
-                    Ok(Some(s)) => Some(s),
-                    Ok(None) => {
-                        eprintln!("no saved sessions to continue");
-                        None
-                    }
-                    Err(e) => {
-                        eprintln!("warning: failed to load the latest session: {e}");
-                        None
-                    }
-                },
-                None => None,
+            let initial = if forked.is_some() {
+                forked
+            } else {
+                match resume_id {
+                    Some(target) => match load_session_target(&app.config_dir, &target) {
+                        Ok(s) => Some(s),
+                        Err(e) => {
+                            eprintln!("warning: failed to load session {target}: {e}");
+                            None
+                        }
+                    },
+                    None if cli.continue_latest => match session::latest(&app.config_dir) {
+                        Ok(Some(s)) => Some(s),
+                        Ok(None) => {
+                            eprintln!("no saved sessions to continue");
+                            None
+                        }
+                        Err(e) => {
+                            eprintln!("warning: failed to load the latest session: {e}");
+                            None
+                        }
+                    },
+                    None => None,
+                }
             };
 
             if cli.tui && !cfg!(feature = "tui") {
@@ -333,7 +363,7 @@ fn run_sessions_cmd(app: &AppConfig, action: SessionAction) -> anyhow::Result<()
             let saved = session::save(&app.config_dir, &mut imported)?;
             eprintln!(
                 "imported {} message(s) from {path}",
-                imported.messages.len()
+                imported.branch().len()
             );
             eprintln!("saved as {}", saved.display());
             println!("{}", imported.id);
@@ -348,7 +378,7 @@ fn run_sessions_cmd(app: &AppConfig, action: SessionAction) -> anyhow::Result<()
             std::fs::write(&path, jsonl)?;
             eprintln!(
                 "exported {} message(s) to {}",
-                s.messages.len(),
+                s.branch().len(),
                 path.display()
             );
             Ok(())

@@ -42,6 +42,8 @@ enum UiEvent {
         session: Box<Session>,
         result: Result<String, String>,
     },
+    /// A branch summary finished generating.
+    BranchSummary(Result<String, String>),
 }
 
 struct PendingPermission {
@@ -54,6 +56,21 @@ struct PendingPermission {
 struct Picker {
     sessions: Vec<crate::session::SessionSummary>,
     selected: usize,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TreeMode {
+    /// Switch the active leaf to the selected entry (`/tree`).
+    Switch,
+    /// Start a new session from the selected user message (`/fork`).
+    Fork,
+}
+
+/// Tree overlay: `(entry id, depth, label)`.
+struct TreeOverlay {
+    items: Vec<(String, usize, String)>,
+    selected: usize,
+    mode: TreeMode,
 }
 
 struct State {
@@ -74,6 +91,10 @@ struct State {
     quit: bool,
     pending_perm: Option<PendingPermission>,
     picker: Option<Picker>,
+    tree: Option<TreeOverlay>,
+    /// Length of the active branch when the current turn started; new messages
+    /// from the turn are appended from this index.
+    branch_len: usize,
 }
 
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -124,17 +145,19 @@ async fn run(
         quit: false,
         pending_perm: None,
         picker: None,
+        tree: None,
+        branch_len: 0,
     };
     if pick {
         // Bare `-r`: start empty and let the user choose a session.
         state.session = Session::new(&app.model);
         state.open_picker();
-    } else if !state.session.messages.is_empty() {
+    } else if !state.session.is_empty() {
         state.replay_history();
         state.push_system(format!(
             "(resumed session {}, {} prior messages)",
             state.session.id,
-            state.session.messages.len()
+            state.session.branch().len()
         ));
     }
     state.push_system(format!(
@@ -168,6 +191,7 @@ async fn run(
                         }
                         state.save();
                     }
+                    UiEvent::BranchSummary(result) => state.finish_branch_summary(result),
                 }
             }
             Some(req) = permission_rx.recv() => {
@@ -205,6 +229,18 @@ impl State {
                 KeyCode::Down | KeyCode::Char('j') => self.picker_move(1),
                 KeyCode::Enter => self.picker_confirm(),
                 KeyCode::Esc => self.picker = None,
+                _ => {}
+            }
+            return;
+        }
+
+        // An open tree overlay owns the keyboard.
+        if self.tree.is_some() {
+            match key.code {
+                KeyCode::Up | KeyCode::Char('k') => self.tree_move(-1),
+                KeyCode::Down | KeyCode::Char('j') => self.tree_move(1),
+                KeyCode::Enter => self.tree_confirm(ui_tx),
+                KeyCode::Esc => self.tree = None,
                 _ => {}
             }
             return;
@@ -302,7 +338,7 @@ impl State {
 
         // Persist the user message *before* the turn runs so an interrupt
         // (Ctrl+C) or crash still leaves a resumable session.
-        self.session.messages.push(Message::user_text(prompt));
+        self.session.push_message(Message::user_text(prompt));
         self.save();
 
         let cfg = AgentConfig::new(self.app.model.clone(), self.system_prompt.clone())
@@ -311,7 +347,8 @@ impl State {
             .with_thinking(self.app.thinking_level)
             .with_api_key(self.app.api_key.clone())
             .with_permission(self.permission.clone());
-        let history = self.session.messages.clone();
+        let history = self.session.messages();
+        self.branch_len = history.len();
 
         let ui = ui_tx.clone();
         tokio::spawn(async move {
@@ -354,9 +391,15 @@ impl State {
                 for l in outcome.output {
                     self.push_system(l);
                 }
+                match outcome.action {
+                    slash::SlashAction::Tree => self.open_tree(TreeMode::Switch),
+                    slash::SlashAction::Fork => self.open_tree(TreeMode::Fork),
+                    slash::SlashAction::None => {}
+                }
                 if !outcome.keep_going {
                     self.quit = true;
                 }
+                self.save();
             }
             Err(e) => self.push_error(format!("{e}")),
         }
@@ -410,7 +453,11 @@ impl State {
 
     fn finish_turn(&mut self, res: pi_agent::Result<AgentRun>) {
         match res {
-            Ok(run) => self.session.replace_messages(run.messages),
+            Ok(run) => {
+                if let Some(new_messages) = run.messages.get(self.branch_len..) {
+                    self.session.append_messages(new_messages);
+                }
+            }
             Err(e) => {
                 self.push_error(format!("agent error: {e}"));
                 self.record_partial_assistant();
@@ -432,18 +479,17 @@ impl State {
             return;
         }
         let text = std::mem::take(&mut self.streaming);
-        self.session
-            .messages
-            .push(Message::Assistant(pi_ai::AssistantMessage {
-                content: vec![Content::text(text.clone())],
-                api: self.app.model.api.clone(),
-                provider: self.app.model.provider.clone(),
-                model: self.app.model.id.clone(),
-                usage: pi_ai::Usage::default(),
-                stop_reason: pi_ai::StopReason::Aborted,
-                error_message: None,
-                timestamp: pi_ai::now_ms(),
-            }));
+        let message = Message::Assistant(pi_ai::AssistantMessage {
+            content: vec![Content::text(text.clone())],
+            api: self.app.model.api.clone(),
+            provider: self.app.model.provider.clone(),
+            model: self.app.model.id.clone(),
+            usage: pi_ai::Usage::default(),
+            stop_reason: pi_ai::StopReason::Aborted,
+            error_message: None,
+            timestamp: pi_ai::now_ms(),
+        });
+        self.session.push_message(message);
         self.push_assistant(text);
     }
 
@@ -491,13 +537,138 @@ impl State {
                 self.push_system(format!(
                     "(resumed session {}, {} prior messages)",
                     self.session.id,
-                    self.session.messages.len()
+                    self.session.branch().len()
                 ));
             }
             Err(e) => {
                 self.push_error(format!("load failed: {e}"));
                 self.picker = Some(picker);
             }
+        }
+    }
+
+    fn open_tree(&mut self, mode: TreeMode) {
+        let mut items = self.session.tree_items();
+        if mode == TreeMode::Fork {
+            items.retain(|(_, _, label)| label.starts_with('❯'));
+        }
+        if items.is_empty() {
+            self.push_system("(no entries to choose from)".to_string());
+            return;
+        }
+        let selected = match (mode, self.session.active_leaf.as_deref()) {
+            (TreeMode::Switch, Some(leaf)) => items
+                .iter()
+                .position(|(id, _, _)| id == leaf)
+                .unwrap_or(items.len() - 1),
+            _ => 0,
+        };
+        self.tree = Some(TreeOverlay {
+            items,
+            selected,
+            mode,
+        });
+    }
+
+    fn tree_move(&mut self, delta: isize) {
+        if let Some(tree) = &mut self.tree {
+            let len = tree.items.len() as isize;
+            if len > 0 {
+                tree.selected = (tree.selected as isize + delta).rem_euclid(len) as usize;
+            }
+        }
+    }
+
+    fn tree_confirm(&mut self, ui_tx: &mpsc::UnboundedSender<UiEvent>) {
+        let Some(tree) = self.tree.take() else {
+            return;
+        };
+        let Some((id, _, _)) = tree.items.get(tree.selected).cloned() else {
+            return;
+        };
+
+        match tree.mode {
+            TreeMode::Switch => {
+                let old_leaf = self.session.active_leaf.clone();
+                let abandoned = self.session.abandoned(old_leaf.as_deref(), Some(&id));
+                self.session.set_active_leaf(Some(id));
+                self.lines.clear();
+                self.replay_history();
+                self.push_system(format!(
+                    "(switched to {} messages)",
+                    self.session.branch().len()
+                ));
+                self.save();
+                if !abandoned.is_empty() {
+                    self.push_system("(summarizing abandoned branch…)".to_string());
+                    let app = self.app.clone();
+                    let ui = ui_tx.clone();
+                    tokio::spawn(async move {
+                        let result = slash::summarize(&app, abandoned)
+                            .await
+                            .map_err(|e| e.to_string());
+                        let _ = ui.send(UiEvent::BranchSummary(result));
+                    });
+                }
+            }
+            TreeMode::Fork => {
+                let prompt = self
+                    .session
+                    .entries
+                    .iter()
+                    .find(|e| e.id == id)
+                    .map(|e| match &e.message {
+                        Message::User { content, .. } => content
+                            .iter()
+                            .filter_map(|c| c.as_text())
+                            .collect::<Vec<_>>()
+                            .join(""),
+                        _ => String::new(),
+                    })
+                    .unwrap_or_default();
+                let parent = self
+                    .session
+                    .entries
+                    .iter()
+                    .find(|e| e.id == id)
+                    .and_then(|e| e.parent_id.clone());
+                let prefix: Vec<Message> = parent
+                    .as_deref()
+                    .map(|p| {
+                        self.session
+                            .branch_to(p)
+                            .into_iter()
+                            .map(|e| e.message.clone())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                let mut new = Session::new(&self.app.model);
+                new.replace_messages(prefix);
+                self.session = new;
+                self.lines.clear();
+                self.replay_history();
+                self.input = prompt;
+                self.cursor = self.input.chars().count();
+                self.push_system(format!("(forked into new session {})", self.session.id));
+                self.save();
+            }
+        }
+    }
+
+    fn finish_branch_summary(&mut self, result: Result<String, String>) {
+        match result {
+            Ok(summary) if !summary.trim().is_empty() => {
+                let text = format!("[branch summary]\n{}", summary.trim());
+                self.session.push_message(Message::user_text(text.clone()));
+                self.push_system("(branch summary)".to_string());
+                for line in text.split('\n') {
+                    self.push_system(line.to_string());
+                }
+                self.save();
+            }
+            Ok(_) => {}
+            Err(e) => self.push_error(format!("branch summary failed: {e}")),
         }
     }
 
@@ -564,7 +735,7 @@ impl State {
 
     /// Replay a loaded session's transcript so a resume is visibly restored.
     fn replay_history(&mut self) {
-        let messages = self.session.messages.clone();
+        let messages = self.session.messages();
         for message in &messages {
             match message {
                 Message::User { content, .. } => {
@@ -653,6 +824,7 @@ impl State {
             self.render_permission(frame, area);
         }
         self.render_picker(frame, area);
+        self.render_tree(frame, area);
     }
 
     fn render_title(&self, frame: &mut ratatui::Frame, area: Rect) {
@@ -723,7 +895,11 @@ impl State {
             .block(Block::bordered().title(title))
             .wrap(Wrap { trim: false });
         frame.render_widget(paragraph, area);
-        if self.pending_perm.is_none() && self.picker.is_none() && cursor_row < inner_height {
+        if self.pending_perm.is_none()
+            && self.picker.is_none()
+            && self.tree.is_none()
+            && cursor_row < inner_height
+        {
             let x = area
                 .x
                 .saturating_add(1)
@@ -849,6 +1025,45 @@ impl State {
             .collect();
         let block = Block::bordered()
             .title(" resume a session   ↑/↓ · Enter · Esc new ")
+            .border_style(Style::default().fg(Color::Cyan));
+        frame.render_widget(Paragraph::new(Text::from(lines)).block(block), popup);
+    }
+
+    fn render_tree(&self, frame: &mut ratatui::Frame, area: Rect) {
+        let Some(tree) = &self.tree else {
+            return;
+        };
+        let popup = centered_rect(84, 74, area);
+        frame.render_widget(Clear, popup);
+        let inner_height = popup.height.saturating_sub(2) as usize;
+        let start = tree.selected.saturating_sub(inner_height.saturating_sub(1));
+        let lines: Vec<Line> = tree
+            .items
+            .iter()
+            .enumerate()
+            .skip(start)
+            .take(inner_height)
+            .map(|(i, (_, depth, label))| {
+                let text = format!("{}{}", "  ".repeat(*depth), label);
+                if i == tree.selected {
+                    Line::styled(
+                        text,
+                        Style::default()
+                            .bg(Color::Cyan)
+                            .fg(Color::Black)
+                            .add_modifier(Modifier::BOLD),
+                    )
+                } else {
+                    Line::from(text)
+                }
+            })
+            .collect();
+        let title = match tree.mode {
+            TreeMode::Switch => " session tree   ↑/↓ · Enter switch · Esc cancel ",
+            TreeMode::Fork => " fork from a user message   ↑/↓ · Enter fork · Esc cancel ",
+        };
+        let block = Block::bordered()
+            .title(title)
             .border_style(Style::default().fg(Color::Cyan));
         frame.render_widget(Paragraph::new(Text::from(lines)).block(block), popup);
     }
@@ -984,6 +1199,8 @@ mod tests {
             quit: false,
             pending_perm: None,
             picker: None,
+            tree: None,
+            branch_len: 0,
         }
     }
 
@@ -1136,7 +1353,8 @@ mod tests {
         state.streaming = "partial answer".into();
         state.record_partial_assistant();
         assert!(state.streaming.is_empty());
-        match state.session.messages.last() {
+        let messages = state.session.messages();
+        match messages.last() {
             Some(Message::Assistant(a)) => {
                 assert_eq!(a.stop_reason, pi_ai::StopReason::Aborted);
                 assert_eq!(a.content[0].as_text(), Some("partial answer"));
@@ -1156,7 +1374,7 @@ mod tests {
         ));
         let mut state = test_state();
         state.app.config_dir = dir.clone();
-        state.session.messages.push(Message::user_text("hello"));
+        state.session.push_message(Message::user_text("hello"));
         state.streaming = "partial".into();
         state.busy = true;
 
@@ -1179,11 +1397,10 @@ mod tests {
     #[test]
     fn replay_history_renders_transcript() {
         let mut state = test_state();
-        state.session.messages.push(Message::user_text("hello"));
+        state.session.push_message(Message::user_text("hello"));
         state
             .session
-            .messages
-            .push(Message::Assistant(pi_ai::AssistantMessage {
+            .push_message(Message::Assistant(pi_ai::AssistantMessage {
                 content: vec![Content::text("world")],
                 api: "openai-completions".into(),
                 provider: "deepseek".into(),
@@ -1234,7 +1451,7 @@ mod tests {
         ));
         let model = pi_ai::Model::openai_gpt_4o();
         let mut saved = Session::new(&model);
-        saved.messages.push(Message::user_text("from picker"));
+        saved.push_message(Message::user_text("from picker"));
         crate::session::save(&dir, &mut saved).unwrap();
 
         let mut state = test_state();
@@ -1246,7 +1463,54 @@ mod tests {
         state.picker_confirm();
         assert!(state.picker.is_none());
         assert_eq!(state.session.id, saved.id);
-        assert_eq!(state.session.messages.len(), 1);
+        assert_eq!(state.session.branch().len(), 1);
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    fn assistant(text: &str) -> Message {
+        Message::Assistant(pi_ai::AssistantMessage {
+            content: vec![Content::text(text)],
+            api: "openai-completions".into(),
+            provider: "deepseek".into(),
+            model: "deepseek-v4-flash".into(),
+            usage: pi_ai::Usage::default(),
+            stop_reason: pi_ai::StopReason::Stop,
+            error_message: None,
+            timestamp: pi_ai::now_ms(),
+        })
+    }
+
+    #[test]
+    fn tree_switch_to_same_leaf_keeps_branch() {
+        let mut state = test_state();
+        state.session.push_message(Message::user_text("a"));
+        state.session.push_message(assistant("b"));
+        let (tx, _rx) = mpsc::unbounded_channel();
+        state.open_tree(TreeMode::Switch);
+        // Starts on the active leaf.
+        assert_eq!(state.tree.as_ref().unwrap().selected, 1);
+        state.tree_confirm(&tx);
+        assert!(state.tree.is_none());
+        assert_eq!(state.session.branch().len(), 2);
+    }
+
+    #[test]
+    fn tree_fork_starts_new_session_with_prefix() {
+        let mut state = test_state();
+        state.session.push_message(Message::user_text("first"));
+        state.session.push_message(assistant("ok"));
+        state.session.push_message(Message::user_text("second"));
+        let original_id = state.session.id.clone();
+
+        state.open_tree(TreeMode::Fork);
+        // Only user entries are listed.
+        assert_eq!(state.tree.as_ref().unwrap().items.len(), 2);
+        state.tree_move(1);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        state.tree_confirm(&tx);
+
+        assert_ne!(state.session.id, original_id);
+        assert_eq!(state.session.messages().len(), 2);
+        assert_eq!(state.input, "second");
     }
 }

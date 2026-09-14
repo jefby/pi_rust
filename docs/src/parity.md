@@ -65,7 +65,7 @@ Kimi, ...) works. It does **not** add provider-specific behavior.
 | Provider/model selection | `--provider`, `--model <pattern>` (glob/`provider/id`), `--models`, `--list-models` | `-m` / `PI_MODEL` (alias or upstream default) |
 | Tools control | `--tools`, `--exclude-tools`, `--no-tools`, `--no-builtin-tools` | ❌ |
 | System prompt | `--system-prompt`, `--append-system-prompt` | ✅ |
-| Sessions | `--continue`, `--resume`, `--session`, `--session-id`, `--fork`, `--session-dir`, `--no-session`, `--name` | 🟡 `--resume`, `--session`, `--continue`; upstream `.jsonl` import/export |
+| Sessions | `--continue`, `--resume`, `--session`, `--session-id`, `--fork`, `--session-dir`, `--no-session`, `--name` | 🟡 `--resume`, `--session`, `--continue`, `--fork`; upstream `.jsonl` tree import/export |
 | Resources | `--extension`, `--skill`, `--prompt-template`, `--theme`, `--no-*` | ❌ |
 | Other | `--export` (HTML), `--offline`, `--verbose`, `--approve`, `--tui-mode` | ❌ |
 
@@ -86,7 +86,7 @@ Kimi, ...) works. It does **not** add provider-specific behavior.
 |------------|:--------:|:----:|
 | Persistence | ✅ JSONL session tree | 🟡 single JSON file |
 | Resume / continue | ✅ | 🟡 `--resume <id>` only |
-| Branching / fork / tree nav | ✅ | ❌ |
+| Branching / fork / tree nav | ✅ | 🟡 in-file `/tree`, `/fork`, `/clone`, `--fork`, branch summary |
 | Context compaction | ✅ + branch summarization | 🟡 simple `/compact` |
 | Session naming | ✅ | ❌ |
 

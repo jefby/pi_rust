@@ -26,11 +26,11 @@ pub async fn run_interactive(
     );
 
     let mut session = initial.unwrap_or_else(|| Session::new(&app.model));
-    if !session.messages.is_empty() {
+    if !session.is_empty() {
         eprintln!(
             "(resumed session {}, {} prior messages)",
             session.id,
-            session.messages.len()
+            session.branch().len()
         );
     }
 
@@ -61,8 +61,15 @@ pub async fn run_interactive(
             for l in &outcome.output {
                 eprintln!("{l}");
             }
+            if outcome.action != slash::SlashAction::None {
+                eprintln!("(/tree and /fork need the full-screen TUI; use --features tui)");
+            }
             if !outcome.keep_going {
                 break;
+            }
+            // Persist commands that changed the session (/clone, /resume, ...).
+            if let Err(e) = crate::session::save(&app.config_dir, &mut session) {
+                eprintln!("(warning: session save failed: {e})");
             }
             continue;
         }
@@ -76,11 +83,12 @@ pub async fn run_interactive(
         let (tx, mut rx) = mpsc::unbounded_channel();
         // Persist the user message before the turn so an interrupt still leaves
         // a resumable session on disk.
-        session.messages.push(Message::user_text(prompt));
+        session.push_message(Message::user_text(prompt));
         if let Err(e) = crate::session::save(&app.config_dir, &mut session) {
             eprintln!("(warning: session save failed: {e})");
         }
-        let history = session.messages.clone();
+        let history = session.messages();
+        let branch_len = history.len();
 
         let cfg_cloned = cfg.clone();
         let handle =
@@ -120,7 +128,9 @@ pub async fn run_interactive(
             }
         }
         let res = handle.await??;
-        session.replace_messages(res.messages);
+        if let Some(new_messages) = res.messages.get(branch_len..) {
+            session.append_messages(new_messages);
+        }
         if let Err(e) = crate::session::save(&app.config_dir, &mut session) {
             eprintln!("(warning: session save failed: {e})");
         }

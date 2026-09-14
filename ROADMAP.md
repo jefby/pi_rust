@@ -29,6 +29,8 @@
       `pi --resume <id>` and `pi sessions list / show / delete`.
 - [x] **Upstream session interop**: import/export the TypeScript `pi` JSONL
       format (`pi sessions import/export`), and `--resume <path.jsonl>`.
+- [x] **Tree sessions**: entries with `id`/`parent_id`; `/tree` branch switch,
+      `/fork`, `/clone`, `--fork`, and branch summaries on switch.
 - [x] **`AGENTS.md` / project-prompt loading**.
 - [x] Slash commands: `/clear` (as `/reset`), `/cost`, `/tools`, `/sessions`,
       `/resume`, `/session`, `/help`, `/model`, `/quit`, `/exit`.

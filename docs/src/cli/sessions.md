@@ -29,6 +29,29 @@ pi --session 0193abcd-...            # explicit-by-path alias
 Inside the REPL you can also use `/resume <id>` to swap to a saved
 session, or `/session` to print the current session id.
 
+## Branching (session tree)
+
+Sessions are stored as trees: every message is an entry with an `id` and a
+`parent_id`, and the active conversation is the path from the root to
+`active_leaf`. New messages are appended as children of the active leaf.
+
+| Command | Effect |
+|---------|--------|
+| `/tree` | Pick an earlier entry and continue from there (branch switch). |
+| `/fork` | Start a new session from a previous user message (the prompt is placed back in the input). |
+| `/clone` | Duplicate the active branch into a new session file. |
+
+`--fork <id|path>` does the same as `/clone` from the command line: it copies
+the target's active branch into a new session and opens it.
+
+When `/tree` switches away from a branch, the abandoned segment is summarized
+with the model and attached at the new position as a `[branch summary]`
+message, so context from the path you left is preserved without replaying it.
+
+Upstream `.jsonl` sessions keep their **full tree** on import, and export
+writes the tree back (`parentId` links preserved), so branches survive a
+round trip.
+
 ## When sessions are saved
 
 The transcript is written to disk **before each turn runs** and again when the

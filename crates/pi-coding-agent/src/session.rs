@@ -1,12 +1,30 @@
-//! Session persistence: save transcripts as JSON under
-//! `$XDG_CONFIG_HOME/pi/sessions/<id>.json`, list them, and load by id.
+//! Session persistence: tree-structured transcripts stored as JSON under
+//! `$XDG_CONFIG_HOME/pi/sessions/<id>.json`, plus import/export of the
+//! upstream (`@earendil-works/pi`) JSONL tree format.
+//!
+//! Every message is an [`Entry`] with an `id` and optional `parent_id`; the
+//! active conversation is the path from the root to `active_leaf`. New messages
+//! are appended as children of the active leaf, so branching only requires
+//! moving the leaf.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use pi_ai::{AssistantMessage, Content, Cost, Message, StopReason, ToolResultMessage, Usage};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+/// One node of a session tree.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Entry {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+    #[serde(default)]
+    pub timestamp: i64,
+    pub message: Message,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
@@ -15,7 +33,22 @@ pub struct Session {
     pub updated_ms: i64,
     pub model: String,
     pub provider: String,
-    pub messages: Vec<Message>,
+    #[serde(default)]
+    pub entries: Vec<Entry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_leaf: Option<String>,
+}
+
+/// On-disk shape used before sessions became trees.
+#[derive(Deserialize)]
+struct LegacySession {
+    id: String,
+    created_ms: i64,
+    updated_ms: i64,
+    model: String,
+    provider: String,
+    #[serde(default)]
+    messages: Vec<Message>,
 }
 
 impl Session {
@@ -27,14 +60,201 @@ impl Session {
             updated_ms: now,
             model: model.id.clone(),
             provider: model.provider.clone(),
-            messages: Vec::new(),
+            entries: Vec::new(),
+            active_leaf: None,
         }
     }
 
+    /// Parse a native session file, migrating the pre-tree `messages` format.
+    pub fn from_json(text: &str) -> anyhow::Result<Self> {
+        let value: Value = serde_json::from_str(text)?;
+        if value.get("entries").is_some() {
+            Ok(serde_json::from_value(value)?)
+        } else {
+            let legacy: LegacySession = serde_json::from_value(value)?;
+            let mut session = Session {
+                id: legacy.id,
+                created_ms: legacy.created_ms,
+                updated_ms: legacy.updated_ms,
+                model: legacy.model,
+                provider: legacy.provider,
+                entries: Vec::new(),
+                active_leaf: None,
+            };
+            for message in legacy.messages {
+                session.push_message(message);
+            }
+            Ok(session)
+        }
+    }
+
+    pub fn to_json(&self) -> anyhow::Result<String> {
+        Ok(serde_json::to_string_pretty(self)?)
+    }
+
+    /// Entries from the root to `id` (inclusive).
+    pub fn branch_to(&self, id: &str) -> Vec<&Entry> {
+        let index: HashMap<&str, &Entry> =
+            self.entries.iter().map(|e| (e.id.as_str(), e)).collect();
+        let mut chain = Vec::new();
+        let mut cursor = Some(id.to_string());
+        let mut guard = 0usize;
+        while let Some(current) = cursor {
+            let Some(entry) = index.get(current.as_str()).copied() else {
+                break;
+            };
+            chain.push(entry);
+            cursor = entry.parent_id.clone();
+            guard += 1;
+            if guard > self.entries.len() {
+                break; // cycle guard
+            }
+        }
+        chain.reverse();
+        chain
+    }
+
+    /// Entries on the active branch (root → active leaf).
+    pub fn branch(&self) -> Vec<&Entry> {
+        let leaf = self
+            .active_leaf
+            .clone()
+            .or_else(|| self.entries.last().map(|e| e.id.clone()));
+        match leaf {
+            Some(id) => self.branch_to(&id),
+            None => Vec::new(),
+        }
+    }
+
+    /// Active branch as a flat transcript.
+    pub fn messages(&self) -> Vec<Message> {
+        self.branch()
+            .into_iter()
+            .map(|e| e.message.clone())
+            .collect()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Append `message` as a child of the active leaf and move the leaf to it.
+    pub fn push_message(&mut self, message: Message) -> String {
+        let id = new_entry_id();
+        self.entries.push(Entry {
+            id: id.clone(),
+            parent_id: self.active_leaf.clone(),
+            timestamp: pi_ai::now_ms(),
+            message,
+        });
+        self.active_leaf = Some(id.clone());
+        self.updated_ms = pi_ai::now_ms();
+        id
+    }
+
+    pub fn append_messages(&mut self, messages: &[Message]) {
+        for message in messages {
+            self.push_message(message.clone());
+        }
+    }
+
+    /// Rebuild the session as a fresh linear branch (used by `/compact`, `/reset`).
     pub fn replace_messages(&mut self, messages: Vec<Message>) {
-        self.messages = messages;
+        self.entries.clear();
+        self.active_leaf = None;
+        for message in messages {
+            self.push_message(message);
+        }
+    }
+
+    /// Move the active leaf (branch switch). Used by the `tui` feature.
+    #[allow(dead_code)]
+    pub fn set_active_leaf(&mut self, id: Option<String>) {
+        self.active_leaf = id;
         self.updated_ms = pi_ai::now_ms();
     }
+
+    /// Messages on the branch from `from_leaf` that are not shared with the
+    /// branch to `to_leaf` — the segment abandoned by a branch switch. Used by
+    /// the `tui` feature.
+    #[allow(dead_code)]
+    pub fn abandoned(&self, from_leaf: Option<&str>, to_leaf: Option<&str>) -> Vec<Message> {
+        let from = from_leaf.map(|id| self.branch_to(id)).unwrap_or_default();
+        let to = to_leaf.map(|id| self.branch_to(id)).unwrap_or_default();
+        let mut i = 0;
+        while i < from.len() && i < to.len() && from[i].id == to[i].id {
+            i += 1;
+        }
+        from[i..].iter().map(|e| e.message.clone()).collect()
+    }
+
+    /// Label items for the `/tree` overlay: `(entry id, depth, label)`.
+    /// Used by the `tui` feature.
+    #[allow(dead_code)]
+    pub fn tree_items(&self) -> Vec<(String, usize, String)> {
+        let mut depth: HashMap<&str, usize> = HashMap::new();
+        let mut items = Vec::with_capacity(self.entries.len());
+        for entry in &self.entries {
+            let d = entry
+                .parent_id
+                .as_deref()
+                .and_then(|parent| depth.get(parent).copied())
+                .map(|d| d + 1)
+                .unwrap_or(0);
+            depth.insert(entry.id.as_str(), d);
+            items.push((entry.id.clone(), d, entry_label(&entry.message)));
+        }
+        items
+    }
+}
+
+// Entry labels for the `/tree` overlay; only used by the `tui` feature.
+#[allow(dead_code)]
+fn entry_label(message: &Message) -> String {
+    match message {
+        Message::User { content, .. } => {
+            format!("❯ {}", truncate(&blocks_text(content), 60))
+        }
+        Message::Assistant(a) => {
+            let text = blocks_text(&a.content);
+            let tool = a.content.iter().find_map(|c| match c {
+                Content::ToolCall { name, .. } => Some(name.as_str()),
+                _ => None,
+            });
+            match tool {
+                Some(name) if text.is_empty() => format!("  [tool: {name}]"),
+                Some(name) => format!("  {} [tool: {name}]", truncate(&text, 48)),
+                None => format!("  {}", truncate(&text, 60)),
+            }
+        }
+        Message::ToolResult(tr) => {
+            format!(
+                "    [{}: {}]",
+                tr.tool_name,
+                if tr.is_error { "error" } else { "ok" }
+            )
+        }
+    }
+}
+
+#[allow(dead_code)]
+fn truncate(s: &str, n: usize) -> String {
+    let s = s.replace('\n', " ");
+    if s.chars().count() <= n {
+        s
+    } else {
+        let head: String = s.chars().take(n).collect();
+        format!("{head}…")
+    }
+}
+
+#[allow(dead_code)]
+fn blocks_text(content: &[Content]) -> String {
+    content
+        .iter()
+        .filter_map(|c| c.as_text())
+        .collect::<Vec<_>>()
+        .join("")
 }
 
 pub fn sessions_dir(config_dir: &Path) -> PathBuf {
@@ -42,18 +262,17 @@ pub fn sessions_dir(config_dir: &Path) -> PathBuf {
 }
 
 pub fn save(config_dir: &Path, session: &mut Session) -> anyhow::Result<PathBuf> {
-    // Refreshing the timestamp here keeps `--continue` / bare `-r` pointing at
-    // the session that was written last, even when callers appended messages
-    // directly instead of via `replace_messages`.
+    // Refresh the timestamp so `--continue` / bare `-r` point at the session
+    // written last.
     session.updated_ms = pi_ai::now_ms();
     let dir = sessions_dir(config_dir);
     std::fs::create_dir_all(&dir).with_context(|| format!("mkdir {}", dir.display()))?;
     let path = dir.join(format!("{}.json", session.id));
-    let json = serde_json::to_string_pretty(session)?;
-    std::fs::write(&path, json).with_context(|| format!("write {}", path.display()))?;
+    std::fs::write(&path, session.to_json()?)
+        .with_context(|| format!("write {}", path.display()))?;
     tracing::debug!(
         session = %session.id,
-        messages = session.messages.len(),
+        entries = session.entries.len(),
         path = %path.display(),
         "saved session"
     );
@@ -64,8 +283,7 @@ pub fn load(config_dir: &Path, id: &str) -> anyhow::Result<Session> {
     let path = sessions_dir(config_dir).join(format!("{id}.json"));
     let text =
         std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
-    let s: Session = serde_json::from_str(&text)?;
-    Ok(s)
+    Session::from_json(&text)
 }
 
 /// Load the most recently updated session, if any.
@@ -89,12 +307,12 @@ pub fn list(config_dir: &Path) -> anyhow::Result<Vec<SessionSummary>> {
             continue;
         }
         let text = std::fs::read_to_string(&path)?;
-        let s: Session = match serde_json::from_str(&text) {
+        let s: Session = match Session::from_json(&text) {
             Ok(s) => s,
             Err(_) => continue,
         };
-        let first_user = s
-            .messages
+        let messages = s.messages();
+        let first_user = messages
             .iter()
             .find_map(|m| match m {
                 Message::User { content, .. } => content
@@ -118,7 +336,7 @@ pub fn list(config_dir: &Path) -> anyhow::Result<Vec<SessionSummary>> {
             model: s.model,
             provider: s.provider,
             first_message: first_user,
-            turns: s.messages.len(),
+            turns: messages.len(),
         });
     }
     out.sort_by_key(|s| std::cmp::Reverse(s.updated_ms));
@@ -141,9 +359,8 @@ pub struct SessionSummary {
 //
 // Upstream stores sessions as JSONL under
 // `~/.pi/agent/sessions/--<cwd>--/<timestamp>_<uuid>.jsonl`. Each line is a
-// JSON object; message entries carry `id` / `parentId` and form a tree. We read
-// the active branch (last entry back to the root) and flatten it into our
-// linear transcript. Export writes the reverse shape to a new file.
+// JSON object; message entries carry `id` / `parentId` and form a tree. Import
+// keeps the whole tree; export writes it back.
 // ---------------------------------------------------------------------------
 
 /// Load either a native session JSON file or an upstream `.jsonl` session.
@@ -152,24 +369,24 @@ pub fn import(path: &Path) -> anyhow::Result<Session> {
         Some("json") => {
             let text = std::fs::read_to_string(path)
                 .with_context(|| format!("read {}", path.display()))?;
-            Ok(serde_json::from_str(&text)?)
+            Session::from_json(&text)
         }
         _ => import_jsonl(path),
     }
 }
 
-/// Parse an upstream `.jsonl` session into a [`Session`].
+/// Parse an upstream `.jsonl` session into a [`Session`], keeping the tree.
 pub fn import_jsonl(path: &Path) -> anyhow::Result<Session> {
-    struct Entry {
+    struct RawEntry {
         id: String,
         parent: Option<String>,
-        timestamp: Option<String>,
-        message: Option<Value>,
+        timestamp: i64,
+        message: Option<Message>,
     }
 
     let text = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
 
-    let mut entries: Vec<Entry> = Vec::new();
+    let mut raw: Vec<RawEntry> = Vec::new();
     let mut header_id: Option<String> = None;
     let mut header_ts: Option<String> = None;
     for line in text.lines() {
@@ -190,7 +407,7 @@ pub fn import_jsonl(path: &Path) -> anyhow::Result<Session> {
         let Some(id) = value.get("id").and_then(Value::as_str).map(String::from) else {
             continue;
         };
-        entries.push(Entry {
+        raw.push(RawEntry {
             id,
             parent: value
                 .get("parentId")
@@ -199,42 +416,72 @@ pub fn import_jsonl(path: &Path) -> anyhow::Result<Session> {
             timestamp: value
                 .get("timestamp")
                 .and_then(Value::as_str)
-                .map(String::from),
-            message: value.get("message").cloned(),
+                .map(parse_ts_str)
+                .unwrap_or_else(pi_ai::now_ms),
+            message: value.get("message").and_then(convert_message),
         });
     }
 
-    // Walk the active branch: last entry back to the root via `parentId`.
-    let index: std::collections::HashMap<&str, usize> = entries
-        .iter()
-        .enumerate()
-        .map(|(i, e)| (e.id.as_str(), i))
-        .collect();
-    let mut chain: Vec<usize> = Vec::new();
-    let mut cursor = entries.len().checked_sub(1);
-    let mut guard = 0usize;
-    while let Some(i) = cursor {
-        chain.push(i);
-        guard += 1;
-        if guard > entries.len() {
-            break; // cycle guard
+    let index: HashMap<&str, &RawEntry> = raw.iter().map(|e| (e.id.as_str(), e)).collect();
+
+    // The active leaf is the nearest message ancestor of the last written
+    // entry (which may itself be a non-message entry).
+    let active_leaf = {
+        let mut leaf = None;
+        let mut cursor = raw.last().map(|e| e.id.clone());
+        let mut guard = 0usize;
+        while let Some(id) = cursor {
+            match index.get(id.as_str()).copied() {
+                Some(entry) if entry.message.is_some() => {
+                    leaf = Some(id.clone());
+                    break;
+                }
+                Some(entry) => cursor = entry.parent.clone(),
+                None => break,
+            }
+            guard += 1;
+            if guard > raw.len() {
+                break;
+            }
         }
-        cursor = entries[i]
-            .parent
-            .as_deref()
-            .and_then(|parent| index.get(parent).copied());
-    }
-    chain.reverse();
+        leaf
+    };
 
-    let messages: Vec<Message> = chain
-        .into_iter()
-        .filter_map(|i| entries[i].message.as_ref().and_then(convert_message))
+    // Re-link each message entry to its nearest message ancestor, skipping
+    // non-message entries (model changes, custom entries, ...).
+    let resolve_parent = |mut parent: Option<String>| -> Option<String> {
+        let mut guard = 0usize;
+        while let Some(id) = parent {
+            match index.get(id.as_str()).copied() {
+                Some(entry) if entry.message.is_some() => return Some(id),
+                Some(entry) => parent = entry.parent.clone(),
+                None => return None,
+            }
+            guard += 1;
+            if guard > raw.len() {
+                return None;
+            }
+        }
+        None
+    };
+
+    let entries: Vec<Entry> = raw
+        .iter()
+        .filter_map(|entry| {
+            let message = entry.message.clone()?;
+            Some(Entry {
+                id: entry.id.clone(),
+                parent_id: resolve_parent(entry.parent.clone()),
+                timestamp: entry.timestamp,
+                message,
+            })
+        })
         .collect();
 
-    let (model, provider) = messages
+    let (model, provider) = entries
         .iter()
         .rev()
-        .find_map(|m| match m {
+        .find_map(|e| match &e.message {
             Message::Assistant(a) => Some((a.model.clone(), a.provider.clone())),
             _ => None,
         })
@@ -252,12 +499,12 @@ pub fn import_jsonl(path: &Path) -> anyhow::Result<Session> {
             .unwrap_or_else(pi_ai::now_ms),
         updated_ms: entries
             .last()
-            .and_then(|e| e.timestamp.as_deref())
-            .map(parse_ts_str)
+            .map(|e| e.timestamp)
             .unwrap_or_else(pi_ai::now_ms),
         model,
         provider,
-        messages,
+        entries,
+        active_leaf,
     })
 }
 
@@ -395,8 +642,7 @@ fn iso(ms: i64) -> String {
         .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
-/// Render a [`Session`] as upstream v3 JSONL. The caller decides where to
-/// write it; nothing under the upstream agent directory is touched here.
+/// Render a [`Session`] as upstream v3 JSONL, preserving the tree.
 pub fn export_jsonl(session: &Session) -> anyhow::Result<String> {
     let cwd = std::env::current_dir()
         .map(|p| p.to_string_lossy().to_string())
@@ -413,29 +659,18 @@ pub fn export_jsonl(session: &Session) -> anyhow::Result<String> {
     out.push_str(&serde_json::to_string(&header)?);
     out.push('\n');
 
-    let mut parent: Option<String> = None;
-    for (i, message) in session.messages.iter().enumerate() {
-        let id = format!("{:x}-{:04x}", session.created_ms.max(0), i);
-        let entry = serde_json::json!({
+    for entry in &session.entries {
+        let value = serde_json::json!({
             "type": "message",
-            "id": id,
-            "parentId": parent,
-            "timestamp": iso(message_timestamp(message)),
-            "message": export_message(message),
+            "id": entry.id,
+            "parentId": entry.parent_id,
+            "timestamp": iso(entry.timestamp),
+            "message": export_message(&entry.message),
         });
-        out.push_str(&serde_json::to_string(&entry)?);
+        out.push_str(&serde_json::to_string(&value)?);
         out.push('\n');
-        parent = Some(id);
     }
     Ok(out)
-}
-
-fn message_timestamp(message: &Message) -> i64 {
-    match message {
-        Message::User { timestamp, .. } => *timestamp,
-        Message::Assistant(a) => a.timestamp,
-        Message::ToolResult(tr) => tr.timestamp,
-    }
 }
 
 fn export_message(message: &Message) -> Value {
@@ -524,101 +759,12 @@ fn stop_reason_str(reason: StopReason) -> &'static str {
     }
 }
 
-#[cfg(test)]
-#[allow(clippy::items_after_test_module)]
-mod tests {
-    use super::*;
-
-    fn temp_dir(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "pi-rs-session-{tag}-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
-    }
-
-    const SAMPLE: &[&str] = &[
-        r#"{"type":"session","version":3,"id":"sess-1","timestamp":"2026-05-01T00:00:00.000Z","cwd":"/tmp"}"#,
-        r#"{"type":"message","id":"a","parentId":null,"timestamp":"2026-05-01T00:00:01.000Z","message":{"role":"user","content":[{"type":"text","text":"hi"}],"timestamp":"2026-05-01T00:00:01.000Z"}}"#,
-        r#"{"type":"message","id":"b","parentId":"a","timestamp":"2026-05-01T00:00:02.000Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"pondering"},{"type":"text","text":"hello"},{"type":"toolCall","id":"c1","name":"read","arguments":{"path":"x"}}],"api":"openai-completions","provider":"deepseek","model":"deepseek-v4-flash","usage":{"input":10,"output":2,"cacheRead":1,"cacheWrite":0,"totalTokens":12,"cost":{"input":0.1,"output":0.2,"cacheRead":0.01,"cacheWrite":0,"total":0.31}},"stopReason":"toolUse","timestamp":"2026-05-01T00:00:02.000Z"}}"#,
-        r#"{"type":"message","id":"c","parentId":"b","timestamp":"2026-05-01T00:00:03.000Z","message":{"role":"toolResult","toolCallId":"c1","toolName":"read","content":[{"type":"text","text":"contents"}],"isError":false,"timestamp":"2026-05-01T00:00:03.000Z"}}"#,
-    ];
-
-    #[test]
-    fn imports_active_branch() {
-        let dir = temp_dir("import");
-        let path = dir.join("s.jsonl");
-        std::fs::write(&path, SAMPLE.join("\n") + "\n").unwrap();
-
-        let session = import_jsonl(&path).unwrap();
-        assert_eq!(session.id, "sess-1");
-        assert_eq!(session.provider, "deepseek");
-        assert_eq!(session.model, "deepseek-v4-flash");
-        assert_eq!(session.messages.len(), 3);
-        match &session.messages[1] {
-            Message::Assistant(a) => {
-                assert_eq!(a.content.len(), 3);
-                assert!(matches!(a.content[0], Content::Thinking { .. }));
-                assert_eq!(a.usage.input, 10);
-                assert_eq!(a.usage.cache_read, 1);
-                assert_eq!(a.stop_reason, StopReason::ToolUse);
-            }
-            other => panic!("expected assistant, got {other:?}"),
-        }
-        std::fs::remove_dir_all(dir).ok();
-    }
-
-    #[test]
-    fn export_round_trips_through_import() {
-        let model = pi_ai::Model::openai_gpt_4o();
-        let mut session = Session::new(&model);
-        session.messages.push(Message::user_text("hi"));
-        session.messages.push(Message::Assistant(AssistantMessage {
-            content: vec![Content::text("yo")],
-            api: "openai-completions".into(),
-            provider: "openai".into(),
-            model: "gpt-4o".into(),
-            usage: Usage::default(),
-            stop_reason: StopReason::Stop,
-            error_message: None,
-            timestamp: pi_ai::now_ms(),
-        }));
-
-        let jsonl = export_jsonl(&session).unwrap();
-        let dir = temp_dir("export");
-        let path = dir.join("out.jsonl");
-        std::fs::write(&path, jsonl).unwrap();
-
-        let back = import_jsonl(&path).unwrap();
-        assert_eq!(back.messages.len(), 2);
-        assert_eq!(back.model, "gpt-4o");
-        match &back.messages[0] {
-            Message::User { content, .. } => assert_eq!(content[0].as_text(), Some("hi")),
-            other => panic!("expected user, got {other:?}"),
-        }
-        std::fs::remove_dir_all(dir).ok();
-    }
-
-    #[test]
-    fn save_bumps_updated_ms() {
-        let dir = temp_dir("touch");
-        let model = pi_ai::Model::openai_gpt_4o();
-        let mut session = Session::new(&model);
-        session.updated_ms = 0;
-        save(&dir, &mut session).unwrap();
-        assert!(session.updated_ms > 0);
-        std::fs::remove_dir_all(dir).ok();
-    }
+fn new_id() -> String {
+    format!("{:x}-{:08x}", pi_ai::now_ms(), rand_u32())
 }
 
-fn new_id() -> String {
-    let now = pi_ai::now_ms();
-    let suffix: u32 = rand_u32();
-    format!("{now:x}-{suffix:08x}")
+fn new_entry_id() -> String {
+    format!("e{:x}-{:08x}", pi_ai::now_ms(), rand_u32())
 }
 
 // Tiny xorshift PRNG seeded from time — we don't pull in `rand` just for this.
@@ -640,4 +786,139 @@ fn rand_u32() -> u32 {
         s.set(x);
         x
     })
+}
+
+#[cfg(test)]
+#[allow(clippy::items_after_test_module)]
+mod tests {
+    use super::*;
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "pi-rs-session-{tag}-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    const SAMPLE: &[&str] = &[
+        r#"{"type":"session","version":3,"id":"sess-1","timestamp":"2026-05-01T00:00:00.000Z","cwd":"/tmp"}"#,
+        r#"{"type":"message","id":"a","parentId":null,"timestamp":"2026-05-01T00:00:01.000Z","message":{"role":"user","content":[{"type":"text","text":"hi"}],"timestamp":"2026-05-01T00:00:01.000Z"}}"#,
+        r#"{"type":"message","id":"b","parentId":"a","timestamp":"2026-05-01T00:00:02.000Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"p"},{"type":"text","text":"hello"},{"type":"toolCall","id":"c1","name":"read","arguments":{"path":"x"}}],"api":"openai-completions","provider":"deepseek","model":"deepseek-v4-flash","usage":{"input":10,"output":2,"cacheRead":1,"cacheWrite":0,"totalTokens":12,"cost":{"input":0.1,"output":0.2,"cacheRead":0.01,"cacheWrite":0,"total":0.31}},"stopReason":"toolUse","timestamp":"2026-05-01T00:00:02.000Z"}}"#,
+        r#"{"type":"message","id":"c","parentId":"b","timestamp":"2026-05-01T00:00:03.000Z","message":{"role":"toolResult","toolCallId":"c1","toolName":"read","content":[{"type":"text","text":"contents"}],"isError":false,"timestamp":"2026-05-01T00:00:03.000Z"}}"#,
+        // second branch off "a"
+        r#"{"type":"message","id":"d","parentId":"a","timestamp":"2026-05-01T00:00:04.000Z","message":{"role":"assistant","content":[{"type":"text","text":"branch two"}],"api":"openai-completions","provider":"deepseek","model":"deepseek-v4-flash","usage":{},"stopReason":"stop","timestamp":"2026-05-01T00:00:04.000Z"}}"#,
+    ];
+
+    #[test]
+    fn imports_full_tree_and_active_branch() {
+        let dir = temp_dir("import");
+        let path = dir.join("s.jsonl");
+        std::fs::write(&path, SAMPLE.join("\n") + "\n").unwrap();
+
+        let session = import_jsonl(&path).unwrap();
+        assert_eq!(session.id, "sess-1");
+        assert_eq!(session.provider, "deepseek");
+        // All four message entries are kept, including the second branch.
+        assert_eq!(session.entries.len(), 4);
+        // Active leaf is the last written entry ("d").
+        assert_eq!(session.active_leaf.as_deref(), Some("d"));
+        assert_eq!(session.messages().len(), 2);
+        match &session.branch_to("c")[1].message {
+            Message::Assistant(a) => assert_eq!(a.stop_reason, StopReason::ToolUse),
+            other => panic!("expected assistant, got {other:?}"),
+        }
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn export_preserves_tree() {
+        let dir = temp_dir("export-tree");
+        let path = dir.join("s.jsonl");
+        std::fs::write(&path, SAMPLE.join("\n") + "\n").unwrap();
+        let session = import_jsonl(&path).unwrap();
+
+        let out = export_jsonl(&session).unwrap();
+        let round = dir.join("round.jsonl");
+        std::fs::write(&round, &out).unwrap();
+        let back = import_jsonl(&round).unwrap();
+        assert_eq!(back.entries.len(), session.entries.len());
+        // "b" and "d" share parent "a" in the round-tripped file.
+        let b_parent = back
+            .entries
+            .iter()
+            .find(|e| e.id == "b")
+            .unwrap()
+            .parent_id
+            .clone();
+        let d_parent = back
+            .entries
+            .iter()
+            .find(|e| e.id == "d")
+            .unwrap()
+            .parent_id
+            .clone();
+        assert_eq!(b_parent.as_deref(), Some("a"));
+        assert_eq!(d_parent.as_deref(), Some("a"));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn branch_switch_and_abandoned() {
+        let dir = temp_dir("branch");
+        let path = dir.join("s.jsonl");
+        std::fs::write(&path, SAMPLE.join("\n") + "\n").unwrap();
+        let mut session = import_jsonl(&path).unwrap();
+
+        let abandoned = session.abandoned(Some("d"), Some("c"));
+        assert_eq!(abandoned.len(), 1);
+        match &abandoned[0] {
+            Message::Assistant(a) => {
+                let text: String = a.content.iter().filter_map(|c| c.as_text()).collect();
+                assert!(text.contains("branch two"));
+            }
+            other => panic!("expected assistant, got {other:?}"),
+        }
+
+        session.set_active_leaf(Some("c".into()));
+        assert_eq!(session.messages().len(), 3);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn migrates_legacy_messages_format() {
+        let model = pi_ai::Model::openai_gpt_4o();
+        let mut session = Session::new(&model);
+        session.push_message(Message::user_text("old"));
+        // Emulate the pre-tree file shape.
+        let legacy = serde_json::json!({
+            "id": session.id,
+            "created_ms": 1,
+            "updated_ms": 2,
+            "model": "gpt-4o",
+            "provider": "openai",
+            "messages": [Message::user_text("legacy")],
+        });
+        let loaded = Session::from_json(&legacy.to_string()).unwrap();
+        assert_eq!(loaded.messages().len(), 1);
+        match &loaded.messages()[0] {
+            Message::User { content, .. } => assert_eq!(content[0].as_text(), Some("legacy")),
+            other => panic!("expected user, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn save_bumps_updated_ms() {
+        let dir = temp_dir("touch");
+        let model = pi_ai::Model::openai_gpt_4o();
+        let mut session = Session::new(&model);
+        session.updated_ms = 0;
+        save(&dir, &mut session).unwrap();
+        assert!(session.updated_ms > 0);
+        std::fs::remove_dir_all(dir).ok();
+    }
 }

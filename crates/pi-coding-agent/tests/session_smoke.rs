@@ -25,13 +25,13 @@ fn save_and_load_roundtrip() {
     let dir = temp_dir();
     let model = Model::anthropic_claude_sonnet_4_6();
     let mut s = session::Session::new(&model);
-    s.messages.push(Message::user_text("hello"));
+    s.push_message(Message::user_text("hello"));
     let path = session::save(&dir, &mut s).unwrap();
     assert!(path.exists());
 
     let loaded = session::load(&dir, &s.id).unwrap();
     assert_eq!(loaded.id, s.id);
-    assert_eq!(loaded.messages.len(), 1);
+    assert_eq!(loaded.branch().len(), 1);
 
     let list = session::list(&dir).unwrap();
     assert_eq!(list.len(), 1);

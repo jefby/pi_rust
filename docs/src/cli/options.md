@@ -20,6 +20,7 @@ pi [OPTIONS] [COMMAND]
 | Flag | Description |
 |------|-------------|
 | `-r, --resume [<ID|PATH>]` | Resume a session; bare `-r` opens the session picker in the TUI (latest in the REPL). Accepts a `.json` / `.jsonl` file. |
+| `--fork <ID|PATH>` | Copy the target's active branch into a new session and open it. |
 | `--session <ID|PATH>` | Same as `--resume`, explicit about file paths. |
 | `-c, --continue` | Continue the most recently updated session. |
 
