@@ -184,6 +184,8 @@ async fn main() -> anyhow::Result<()> {
         model = %resolved.model.id,
         api = %resolved.model.api,
         base_url = %resolved.model.base_url,
+        context_window = resolved.model.context_window,
+        max_tokens = resolved.model.max_tokens,
         has_api_key = resolved.api_key.is_some(),
         "resolved model"
     );

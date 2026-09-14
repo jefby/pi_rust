@@ -165,23 +165,26 @@ fn resolve_from_home(explicit: Option<&str>, home: &AgentHome) -> Option<Resolve
     };
 
     let custom = home.custom_provider(&provider);
+    let catalog = home.catalog_model(&provider, &model_id);
     let builtin = builtin_provider(&provider);
     let api = custom
         .and_then(|p| non_empty(p.api.as_deref()))
+        .or_else(|| catalog.and_then(|m| non_empty(m.api.as_deref())))
         .or_else(|| builtin.map(|(api, _)| api.to_string()))?;
     let base_url = custom
         .and_then(|p| non_empty(p.base_url.as_deref()))
+        .or_else(|| catalog.and_then(|m| non_empty(m.base_url.as_deref())))
         .or_else(|| builtin.map(|(_, url)| url.to_string()))?;
 
-    let (context_window, max_tokens) = custom
-        .and_then(|p| p.models.iter().find(|m| m.id == model_id))
-        .map(|m| {
-            (
-                m.context_window.unwrap_or(200_000),
-                m.max_tokens.unwrap_or(8_192),
-            )
-        })
-        .unwrap_or((200_000, 8_192));
+    let custom_model = custom.and_then(|p| p.models.iter().find(|m| m.id == model_id));
+    let context_window = catalog
+        .and_then(|m| m.context_window)
+        .or_else(|| custom_model.and_then(|m| m.context_window))
+        .unwrap_or(200_000);
+    let max_tokens = catalog
+        .and_then(|m| m.max_tokens)
+        .or_else(|| custom_model.and_then(|m| m.max_tokens))
+        .unwrap_or(8_192);
 
     let model = build_model(
         &provider,
@@ -252,13 +255,6 @@ pub fn resolve_provider(
     let custom = home.and_then(|h| h.custom_provider(provider));
     let builtin = builtin_provider(provider);
 
-    let api = custom
-        .and_then(|p| non_empty(p.api.as_deref()))
-        .or_else(|| builtin.map(|(api, _)| api.to_string()))?;
-    let base_url = custom
-        .and_then(|p| non_empty(p.base_url.as_deref()))
-        .or_else(|| builtin.map(|(_, url)| url.to_string()))?;
-
     let model_id = explicit_model
         .map(str::trim)
         .filter(|s| !s.is_empty())
@@ -277,15 +273,25 @@ pub fn resolve_provider(
             })
         })?;
 
-    let (context_window, max_tokens) = custom
-        .and_then(|p| p.models.iter().find(|m| m.id == model_id))
-        .map(|m| {
-            (
-                m.context_window.unwrap_or(200_000),
-                m.max_tokens.unwrap_or(8_192),
-            )
-        })
-        .unwrap_or((200_000, 8_192));
+    let catalog = home.and_then(|h| h.catalog_model(provider, &model_id));
+    let api = custom
+        .and_then(|p| non_empty(p.api.as_deref()))
+        .or_else(|| catalog.and_then(|m| non_empty(m.api.as_deref())))
+        .or_else(|| builtin.map(|(api, _)| api.to_string()))?;
+    let base_url = custom
+        .and_then(|p| non_empty(p.base_url.as_deref()))
+        .or_else(|| catalog.and_then(|m| non_empty(m.base_url.as_deref())))
+        .or_else(|| builtin.map(|(_, url)| url.to_string()))?;
+
+    let custom_model = custom.and_then(|p| p.models.iter().find(|m| m.id == model_id));
+    let context_window = catalog
+        .and_then(|m| m.context_window)
+        .or_else(|| custom_model.and_then(|m| m.context_window))
+        .unwrap_or(200_000);
+    let max_tokens = catalog
+        .and_then(|m| m.max_tokens)
+        .or_else(|| custom_model.and_then(|m| m.max_tokens))
+        .unwrap_or(8_192);
 
     let model = build_model(
         provider,
@@ -379,6 +385,26 @@ mod tests {
         assert_eq!(resolved.model.api, "openai-completions");
         assert_eq!(resolved.model.base_url, "https://api.deepseek.com");
         assert_eq!(resolved.api_key.as_deref(), Some("sk-deepseek"));
+    }
+
+    #[test]
+    fn catalog_supplies_context_window() {
+        let mut home = home_with_deepseek();
+        let mut models = std::collections::HashMap::new();
+        models.insert(
+            "deepseek-v4-flash".to_string(),
+            crate::pi_agent_config::CatalogModel {
+                id: "deepseek-v4-flash".into(),
+                context_window: Some(1_000_000),
+                max_tokens: Some(384_000),
+                ..Default::default()
+            },
+        );
+        home.catalog.insert("deepseek".into(), models);
+
+        let resolved = resolve_model(None, Some(&home));
+        assert_eq!(resolved.model.context_window, 1_000_000);
+        assert_eq!(resolved.model.max_tokens, 384_000);
     }
 
     #[test]

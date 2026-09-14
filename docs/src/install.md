@@ -81,6 +81,11 @@ with no flags picks up e.g. `deepseek/deepseek-v4-flash` and the matching key
 from `auth.json` with no extra setup. Set `RUST_LOG=debug` to print the
 resolved provider, model, base URL, and whether a key was found.
 
+The **model catalog** is read too — `models-store.json` plus the bundled
+`pi-ai` provider data (located via `PATH`) — so `contextWindow` and
+`maxTokens` are accurate (e.g. 1,000,000 for `deepseek-v4-flash`). This drives
+the TUI status bar's context usage.
+
 ## Full-screen TUI
 
 An optional full-screen TUI (conversation pane, streaming output, permission

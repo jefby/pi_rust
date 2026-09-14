@@ -64,6 +64,26 @@ struct ModelsFile {
     providers: HashMap<String, CustomProvider>,
 }
 
+/// A model entry from the upstream catalog (`models-store.json` or the
+/// bundled `pi-ai` provider data), used for context window / limits / routing.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct CatalogModel {
+    pub id: String,
+    pub name: Option<String>,
+    pub api: Option<String>,
+    pub base_url: Option<String>,
+    pub context_window: Option<u32>,
+    pub max_tokens: Option<u32>,
+    pub reasoning: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+struct StoreProvider {
+    models: Vec<CatalogModel>,
+}
+
 /// Loaded view of the upstream agent directory.
 #[derive(Debug, Clone, Default)]
 pub struct AgentHome {
@@ -71,6 +91,9 @@ pub struct AgentHome {
     pub settings: Settings,
     pub auth: HashMap<String, AuthEntry>,
     pub providers: HashMap<String, CustomProvider>,
+    /// provider → model id → catalog entry (from `models-store.json` and the
+    /// bundled `pi-ai` provider data).
+    pub catalog: HashMap<String, HashMap<String, CatalogModel>>,
 }
 
 impl AgentHome {
@@ -87,6 +110,7 @@ impl AgentHome {
             providers: read_json::<ModelsFile>(&dir.join("models.json"))
                 .map(|m| m.providers)
                 .unwrap_or_default(),
+            catalog: load_catalog(&dir),
             dir,
         };
         tracing::debug!(
@@ -121,6 +145,11 @@ impl AgentHome {
 
     pub fn custom_provider(&self, name: &str) -> Option<&CustomProvider> {
         self.providers.get(name)
+    }
+
+    /// Catalog entry (context window, limits, base URL) for `provider`/`id`.
+    pub fn catalog_model(&self, provider: &str, id: &str) -> Option<&CatalogModel> {
+        self.catalog.get(provider).and_then(|models| models.get(id))
     }
 
     /// Find the custom provider (and model) that declares `model_id`.
@@ -163,6 +192,83 @@ fn expand_tilde(s: &str) -> PathBuf {
 fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Option<T> {
     let text = std::fs::read_to_string(path).ok()?;
     serde_json::from_str(&text).ok()
+}
+
+/// Build `provider → id → model` from the cached `models-store.json` and the
+/// bundled `pi-ai` provider data (which wins, being the source of truth).
+fn load_catalog(agent_dir: &Path) -> HashMap<String, HashMap<String, CatalogModel>> {
+    let mut catalog: HashMap<String, HashMap<String, CatalogModel>> = HashMap::new();
+
+    if let Some(store) =
+        read_json::<HashMap<String, StoreProvider>>(&agent_dir.join("models-store.json"))
+    {
+        for (provider, entry) in store {
+            let models = catalog.entry(provider).or_default();
+            for model in entry.models {
+                if !model.id.is_empty() {
+                    models.insert(model.id.clone(), model);
+                }
+            }
+        }
+    }
+
+    if let Some(data_dir) = find_pi_ai_data_dir() {
+        if let Ok(dir) = std::fs::read_dir(&data_dir) {
+            for entry in dir.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|s| s.to_str()) != Some("json") {
+                    continue;
+                }
+                let Some(provider) = path.file_stem().map(|s| s.to_string_lossy().to_string())
+                else {
+                    continue;
+                };
+                // `{ api: { model_id: {...} } }`
+                let Some(apis) = read_json::<HashMap<String, HashMap<String, CatalogModel>>>(&path)
+                else {
+                    continue;
+                };
+                let models = catalog.entry(provider).or_default();
+                for group in apis.into_values() {
+                    for (id, model) in group {
+                        models.insert(id, model);
+                    }
+                }
+            }
+        }
+        tracing::debug!(dir = %data_dir.display(), "loaded pi-ai model catalog");
+    }
+
+    catalog
+}
+
+/// Locate the bundled `pi-ai` provider data by walking `PATH` (the `pi`
+/// launcher lives next to `node_modules/@earendil-works/pi-coding-agent`).
+fn find_pi_ai_data_dir() -> Option<PathBuf> {
+    const REL: &str =
+        "node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai/dist/providers/data";
+    const REL2: &str = "node_modules/@earendil-works/pi-ai/dist/providers/data";
+
+    if let Some(path) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path) {
+            for rel in [REL, REL2] {
+                let candidate = dir.join(rel);
+                if candidate.is_dir() {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        let candidate = PathBuf::from(local)
+            .join("pi-node")
+            .join("current")
+            .join(REL);
+        if candidate.is_dir() {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 #[cfg(test)]
