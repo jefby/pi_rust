@@ -24,6 +24,7 @@ use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
 use ratatui::DefaultTerminal;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
+use unicode_width::UnicodeWidthChar;
 
 use crate::config::AppConfig;
 use crate::permission::tui::{PermissionRequest, TuiPermission};
@@ -516,17 +517,56 @@ impl State {
         } else {
             " message "
         };
-        let paragraph = Paragraph::new(self.input.clone()).block(Block::bordered().title(title));
+        let inner_width = area.width.saturating_sub(2);
+        let (visible, column) = self.input_view(inner_width);
+        let paragraph = Paragraph::new(visible).block(Block::bordered().title(title));
         frame.render_widget(paragraph, area);
         if self.pending_perm.is_none() {
-            let before = self.input.chars().take(self.cursor).count() as u16;
             let x = area
                 .x
                 .saturating_add(1)
-                .saturating_add(before)
+                .saturating_add(column)
                 .min(area.x + area.width.saturating_sub(2));
             frame.set_cursor_position(Position::new(x, area.y + 1));
         }
+    }
+
+    /// Slice of the input that fits `width` display columns, plus the
+    /// cursor's column within it. Uses display width so wide (CJK) characters
+    /// and the terminal's IME preedit anchor line up correctly, and scrolls
+    /// horizontally when the line overflows.
+    fn input_view(&self, width: u16) -> (String, u16) {
+        let width = width.max(1) as usize;
+        let chars: Vec<char> = self.input.chars().collect();
+        let widths: Vec<usize> = chars
+            .iter()
+            .map(|c| UnicodeWidthChar::width(*c).unwrap_or(0))
+            .collect();
+
+        // Move the window start right until the cursor is on screen.
+        let mut start = 0usize;
+        while start < self.cursor {
+            let before: usize = widths[start..self.cursor].iter().sum();
+            if before < width {
+                break;
+            }
+            start += 1;
+        }
+
+        // Trim the tail so the visible text fits the box.
+        let mut end = chars.len();
+        let mut used = 0usize;
+        for (i, w) in widths.iter().enumerate().skip(start) {
+            used += w;
+            if used > width {
+                end = i;
+                break;
+            }
+        }
+
+        let visible: String = chars[start..end].iter().collect();
+        let column: usize = widths[start..self.cursor.min(end)].iter().sum();
+        (visible, column.min(width.saturating_sub(1)) as u16)
     }
 
     fn render_status(&self, frame: &mut ratatui::Frame, area: Rect) {
@@ -701,5 +741,31 @@ mod tests {
         assert_eq!(state.scroll, 4);
         state.scroll_down(10);
         assert!(state.follow);
+    }
+
+    #[test]
+    fn cursor_column_counts_cjk_as_two_columns() {
+        let mut state = test_state();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        for c in "中文".chars() {
+            state.on_key(key(KeyCode::Char(c)), &tx);
+        }
+        let (visible, column) = state.input_view(20);
+        assert_eq!(visible, "中文");
+        // Two wide glyphs → the cursor sits at display column 4, not 2.
+        assert_eq!(column, 4);
+    }
+
+    #[test]
+    fn input_view_scrolls_for_long_wide_text() {
+        let mut state = test_state();
+        for c in "一二三四五六".chars() {
+            state.input.push(c);
+            state.cursor += 1;
+        }
+        // 12 display columns in a 6-column box: only the tail stays visible.
+        let (visible, column) = state.input_view(6);
+        assert_eq!(visible, "五六");
+        assert_eq!(column, 4);
     }
 }

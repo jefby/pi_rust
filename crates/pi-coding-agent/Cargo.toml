@@ -19,7 +19,7 @@ path = "src/main.rs"
 default = []
 # Full-screen terminal UI (ratatui + crossterm). Off by default so the
 # default binary stays small; enable with `--features tui`.
-tui = ["dep:ratatui", "dep:crossterm"]
+tui = ["dep:ratatui", "dep:crossterm", "dep:unicode-width"]
 
 [dependencies]
 pi-ai = { path = "../pi-ai", version = "1.2.0" }
@@ -40,3 +40,4 @@ async-trait = { workspace = true }
 toml = { workspace = true }
 ratatui = { version = "0.29", optional = true, features = ["unstable-rendered-line-info"] }
 crossterm = { version = "0.28", optional = true, features = ["event-stream"] }
+unicode-width = { version = "0.2", optional = true }

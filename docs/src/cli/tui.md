@@ -36,6 +36,18 @@ it enabled.
 The same commands as the [REPL](./interactive.md#slash-commands) are
 supported, including `/compact`.
 
+## Wide characters and IME
+
+The input box measures text in terminal display columns, so CJK/emoji
+characters (which are two columns wide) keep the cursor aligned and long
+lines scroll horizontally instead of running off the edge.
+
+Input-method (IME) composition itself is handled by the terminal. The app
+positions the real terminal cursor, which is where most terminals anchor the
+candidate window. If your terminal shows no candidate window in the
+full-screen buffer, use `--no-tui` — the line REPL uses the terminal's native
+line editor and IME integration.
+
 ## Size
 
 Enabling the feature links [`ratatui`](https://crates.io/crates/ratatui) and
