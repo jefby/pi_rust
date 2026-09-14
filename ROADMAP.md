@@ -4,6 +4,9 @@
 > [1.0.0](./CHANGELOG.md#100--2026-05-12). The list below records what was
 > delivered and what remains for a future major. New unchecked items are now
 > targeted at 1.x / 2.0.
+>
+> For a feature-by-feature comparison against the TypeScript upstream, see
+> [docs/src/parity.md](./docs/src/parity.md).
 
 ## Milestone 1 — Provider parity for streaming ✅ (delivered in 1.0.0)
 

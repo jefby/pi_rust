@@ -4,6 +4,7 @@
 
 - [Install](./install.md)
 - [Architecture](./architecture.md)
+- [Parity with upstream](./parity.md)
 - [CLI](./cli/print-mode.md)
   - [Print mode](./cli/print-mode.md)
   - [Interactive](./cli/interactive.md)

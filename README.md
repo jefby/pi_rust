@@ -185,6 +185,8 @@ CI runs the same checks on macOS and Linux against stable + MSRV
 - [ROADMAP.md](./ROADMAP.md) — future 1.x targets: OpenAI Responses API,
   Bedrock, prompt caching, MCP client, `--json` print mode, mdBook docs,
   crates.io publishing.
+- [docs/src/parity.md](./docs/src/parity.md) — feature-by-feature comparison
+  with upstream `pi` 0.85.1.
 
 ## License
 
