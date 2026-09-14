@@ -26,7 +26,7 @@ fn save_and_load_roundtrip() {
     let model = Model::anthropic_claude_sonnet_4_6();
     let mut s = session::Session::new(&model);
     s.messages.push(Message::user_text("hello"));
-    let path = session::save(&dir, &s).unwrap();
+    let path = session::save(&dir, &mut s).unwrap();
     assert!(path.exists());
 
     let loaded = session::load(&dir, &s.id).unwrap();

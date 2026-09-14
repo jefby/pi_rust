@@ -323,8 +323,8 @@ fn run_sessions_cmd(app: &AppConfig, action: SessionAction) -> anyhow::Result<()
             Ok(())
         }
         SessionAction::Import { path } => {
-            let imported = session::import(Path::new(&path))?;
-            let saved = session::save(&app.config_dir, &imported)?;
+            let mut imported = session::import(Path::new(&path))?;
+            let saved = session::save(&app.config_dir, &mut imported)?;
             eprintln!(
                 "imported {} message(s) from {path}",
                 imported.messages.len()

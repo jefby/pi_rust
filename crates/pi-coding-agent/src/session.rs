@@ -41,12 +41,22 @@ pub fn sessions_dir(config_dir: &Path) -> PathBuf {
     config_dir.join("sessions")
 }
 
-pub fn save(config_dir: &Path, session: &Session) -> anyhow::Result<PathBuf> {
+pub fn save(config_dir: &Path, session: &mut Session) -> anyhow::Result<PathBuf> {
+    // Refreshing the timestamp here keeps `--continue` / bare `-r` pointing at
+    // the session that was written last, even when callers appended messages
+    // directly instead of via `replace_messages`.
+    session.updated_ms = pi_ai::now_ms();
     let dir = sessions_dir(config_dir);
     std::fs::create_dir_all(&dir).with_context(|| format!("mkdir {}", dir.display()))?;
     let path = dir.join(format!("{}.json", session.id));
     let json = serde_json::to_string_pretty(session)?;
     std::fs::write(&path, json).with_context(|| format!("write {}", path.display()))?;
+    tracing::debug!(
+        session = %session.id,
+        messages = session.messages.len(),
+        path = %path.display(),
+        "saved session"
+    );
     Ok(path)
 }
 
@@ -93,9 +103,18 @@ pub fn list(config_dir: &Path) -> anyhow::Result<Vec<SessionSummary>> {
                 _ => None,
             })
             .unwrap_or_default();
+        // Fall back to the file mtime so sessions written by older builds (with
+        // a stale `updated_ms`) still sort as "most recently written".
+        let file_ms = entry
+            .metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
         out.push(SessionSummary {
             id: s.id,
-            updated_ms: s.updated_ms,
+            updated_ms: s.updated_ms.max(file_ms),
             model: s.model,
             provider: s.provider,
             first_message: first_user,
@@ -581,6 +600,17 @@ mod tests {
             Message::User { content, .. } => assert_eq!(content[0].as_text(), Some("hi")),
             other => panic!("expected user, got {other:?}"),
         }
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn save_bumps_updated_ms() {
+        let dir = temp_dir("touch");
+        let model = pi_ai::Model::openai_gpt_4o();
+        let mut session = Session::new(&model);
+        session.updated_ms = 0;
+        save(&dir, &mut session).unwrap();
+        assert!(session.updated_ms > 0);
         std::fs::remove_dir_all(dir).ok();
     }
 }

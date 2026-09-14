@@ -116,6 +116,7 @@ async fn run(
         pending_perm: None,
     };
     if !state.session.messages.is_empty() {
+        state.replay_history();
         state.push_system(format!(
             "(resumed session {}, {} prior messages)",
             state.session.id,
@@ -421,7 +422,7 @@ impl State {
     }
 
     fn save(&mut self) {
-        if let Err(e) = crate::session::save(&self.app.config_dir, &self.session) {
+        if let Err(e) = crate::session::save(&self.app.config_dir, &mut self.session) {
             self.push_system(format!("(warning: session save failed: {e})"));
         }
     }
@@ -484,6 +485,55 @@ impl State {
         if !self.thinking.is_empty() {
             let text = std::mem::take(&mut self.thinking);
             self.push_thinking(text);
+        }
+    }
+
+    /// Replay a loaded session's transcript so a resume is visibly restored.
+    fn replay_history(&mut self) {
+        let messages = self.session.messages.clone();
+        for message in &messages {
+            match message {
+                Message::User { content, .. } => {
+                    let text = content
+                        .iter()
+                        .filter_map(|c| c.as_text())
+                        .collect::<Vec<_>>()
+                        .join("");
+                    if !text.is_empty() {
+                        self.push_user(text);
+                    }
+                }
+                Message::Assistant(a) => {
+                    for c in &a.content {
+                        match c {
+                            Content::Thinking { thinking, .. } => {
+                                if !thinking.is_empty() {
+                                    self.push_thinking(thinking.clone());
+                                }
+                            }
+                            Content::Text { text } => {
+                                if !text.is_empty() {
+                                    self.push_assistant(text.clone());
+                                }
+                            }
+                            Content::ToolCall {
+                                name, arguments, ..
+                            } => {
+                                self.push_tool(format!(
+                                    "→ {} {}",
+                                    name,
+                                    slash::truncate(&arguments.to_string(), 160)
+                                ));
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Message::ToolResult(tr) => {
+                    let status = if tr.is_error { "error" } else { "ok" };
+                    self.push_tool(format!("← {} {status}", tr.tool_name));
+                }
+            }
         }
     }
 
@@ -962,5 +1012,59 @@ mod tests {
             }
             other => panic!("expected assistant, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn ctrl_c_persists_session() {
+        let dir = std::env::temp_dir().join(format!(
+            "pi-rs-tui-save-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut state = test_state();
+        state.app.config_dir = dir.clone();
+        state.session.messages.push(Message::user_text("hello"));
+        state.streaming = "partial".into();
+        state.busy = true;
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        state.on_key(
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            &tx,
+        );
+        assert!(state.quit);
+
+        let path = dir
+            .join("sessions")
+            .join(format!("{}.json", state.session.id));
+        let text = std::fs::read_to_string(&path).expect("session file written");
+        assert!(text.contains("hello"));
+        assert!(text.contains("partial"));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn replay_history_renders_transcript() {
+        let mut state = test_state();
+        state.session.messages.push(Message::user_text("hello"));
+        state
+            .session
+            .messages
+            .push(Message::Assistant(pi_ai::AssistantMessage {
+                content: vec![Content::text("world")],
+                api: "openai-completions".into(),
+                provider: "deepseek".into(),
+                model: "deepseek-v4-flash".into(),
+                usage: pi_ai::Usage::default(),
+                stop_reason: pi_ai::StopReason::Stop,
+                error_message: None,
+                timestamp: pi_ai::now_ms(),
+            }));
+        state.replay_history();
+        assert_eq!(state.lines.len(), 2);
+        assert!(line_text(&state.lines[0]).contains("hello"));
+        assert!(line_text(&state.lines[1]).contains("world"));
     }
 }

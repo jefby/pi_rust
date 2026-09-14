@@ -77,7 +77,7 @@ pub async fn run_interactive(
         // Persist the user message before the turn so an interrupt still leaves
         // a resumable session on disk.
         session.messages.push(Message::user_text(prompt));
-        if let Err(e) = crate::session::save(&app.config_dir, &session) {
+        if let Err(e) = crate::session::save(&app.config_dir, &mut session) {
             eprintln!("(warning: session save failed: {e})");
         }
         let history = session.messages.clone();
@@ -121,7 +121,7 @@ pub async fn run_interactive(
         }
         let res = handle.await??;
         session.replace_messages(res.messages);
-        if let Err(e) = crate::session::save(&app.config_dir, &session) {
+        if let Err(e) = crate::session::save(&app.config_dir, &mut session) {
             eprintln!("(warning: session save failed: {e})");
         }
     }
